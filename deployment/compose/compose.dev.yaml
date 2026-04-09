@@ -1,0 +1,128 @@
+services:
+  frontend:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/frontend.Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ../../runtime/oracle-tools:/opt/oracle-tools:ro
+      - ../../runtime/datapump-work:/var/lib/oracle-migration/datapump
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+
+  backend:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/backend.Dockerfile
+    env_file:
+      - ../../config/environments/dev.env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://app_user:app_password@postgres:5432/oracle_migration_app}
+      REDIS_BROKER_URL: ${REDIS_BROKER_URL:-redis://redis:6379/0}
+      REDIS_RESULT_BACKEND: ${REDIS_RESULT_BACKEND:-redis://redis:6379/1}
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "oracle-server:172.18.0.1"
+      - "192.168.1.14:172.18.0.1"
+    volumes:
+      - ../../runtime/oracle-tools:/opt/oracle-tools:ro
+      - ../../runtime/datapump-work:/var/lib/oracle-migration/datapump
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/worker.Dockerfile
+    env_file:
+      - ../../config/environments/dev.env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://app_user:app_password@postgres:5432/oracle_migration_app}
+      REDIS_BROKER_URL: ${REDIS_BROKER_URL:-redis://redis:6379/0}
+      REDIS_RESULT_BACKEND: ${REDIS_RESULT_BACKEND:-redis://redis:6379/1}
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "oracle-server:172.18.0.1"
+      - "192.168.1.14:172.18.0.1"
+    volumes:
+      - ../../runtime/oracle-tools:/opt/oracle-tools:ro
+      - ../../runtime/datapump-work:/var/lib/oracle-migration/datapump
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:17-alpine
+    env_file:
+      - ../../config/environments/dev.env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-oracle_migration_app}
+      POSTGRES_USER: ${POSTGRES_USER:-app_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app_password}
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app_user} -d ${POSTGRES_DB:-oracle_migration_app}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      frontend:
+        condition: service_started
+      backend:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+    volumes:
+      - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
+volumes:
+  postgres_dev_data:

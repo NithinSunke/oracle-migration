@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+celery
+redis
+psycopg[binary]
+sqlalchemy
+alembic
+oracledb
+python-multipart
+beautifulsoup4
+opentelemetry-api
+opentelemetry-sdk
