@@ -25,4 +25,5 @@ Starter design repository for an Oracle-to-Oracle migration recommendation web a
 - `docs/migration-decision-engine.md`
 - `docs/application-architecture.md`
 - `docs/project-structure.md`
+- `docs/github-repo-setup-guide.md`
 - `config/migration-rules.example.json`
