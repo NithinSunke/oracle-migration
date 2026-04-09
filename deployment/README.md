@@ -35,10 +35,10 @@ The application is deployed as a multi-container stack:
   - reverse proxy configuration
 - [frontend.conf](/docker/oracle-migration-app/deployment/nginx/frontend.conf)
   - static frontend serving configuration
-- [dev.env](/docker/oracle-migration-app/config/environments/dev.env)
-  - development environment values
-- [prod.env](/docker/oracle-migration-app/config/environments/prod.env)
-  - production environment template
+- [dev.env.example](/docker/oracle-migration-app/config/environments/dev.env.example)
+  - tracked development environment template
+- [prod.env.example](/docker/oracle-migration-app/config/environments/prod.env.example)
+  - tracked production environment template
 
 ## Prerequisites
 
@@ -56,7 +56,15 @@ Install these before starting the application:
 
 ## Development Deployment
 
-Run from the repository root:
+Run from the repository root.
+
+First create the local development env file:
+
+```bash
+cp config/environments/dev.env.example config/environments/dev.env
+```
+
+Then start the stack:
 
 ```bash
 docker compose -f deployment/compose/compose.dev.yaml up -d --build
@@ -87,7 +95,11 @@ docker compose -f deployment/compose/compose.dev.yaml down -v
 
 ## Production-Style Deployment
 
-First update the production environment file:
+First create and update the production environment file:
+
+```bash
+cp config/environments/prod.env.example config/environments/prod.env
+```
 
 - copy values into [prod.env](/docker/oracle-migration-app/config/environments/prod.env)
 - replace placeholder passwords

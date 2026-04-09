@@ -114,10 +114,17 @@ cd oracle-migration
 
 ## 6. Environment Files
 
-The main environment templates are:
+The tracked environment templates are:
 
-- `config/environments/dev.env`
-- `config/environments/prod.env`
+- `config/environments/dev.env.example`
+- `config/environments/prod.env.example`
+
+Create the real runtime files after cloning:
+
+```bash
+cp config/environments/dev.env.example config/environments/dev.env
+cp config/environments/prod.env.example config/environments/prod.env
+```
 
 ### Important Variables
 
@@ -164,8 +171,9 @@ Observability:
 
 ### Configuration Notes
 
-- `dev.env` is for local development and currently contains local-friendly defaults.
-- `prod.env` is a template and must be edited before real deployment.
+- `dev.env.example` is the tracked starter template for local development.
+- `prod.env.example` is the tracked starter template for production-style setup.
+- `dev.env` and `prod.env` are local runtime files you create from the examples.
 - For public or shared environments, replace all placeholder passwords.
 - Do not commit real passwords, database connection strings, tokens, or wallet files back into GitHub.
 
@@ -175,7 +183,13 @@ This is the easiest way to run the app from the GitHub repository.
 
 ### Step 1. Review The Development Environment File
 
-Check:
+Create the local runtime env file first:
+
+```bash
+cp config/environments/dev.env.example config/environments/dev.env
+```
+
+Then check:
 
 - `config/environments/dev.env`
 
@@ -229,7 +243,13 @@ docker compose -f deployment/compose/compose.dev.yaml down -v
 
 ### Step 1. Prepare Production Variables
 
-Edit:
+Create the production runtime env file first:
+
+```bash
+cp config/environments/prod.env.example config/environments/prod.env
+```
+
+Then edit:
 
 - `config/environments/prod.env`
 
@@ -473,6 +493,7 @@ For Oracle live execution features, also provide:
 ```bash
 git clone https://github.com/NithinSunke/oracle-migration.git
 cd oracle-migration
+cp config/environments/dev.env.example config/environments/dev.env
 docker compose -f deployment/compose/compose.dev.yaml up -d --build
 curl http://localhost:8000/api/v1/health
 ```
@@ -484,4 +505,3 @@ git clone https://github.com/NithinSunke/oracle-migration.git
 cd oracle-migration
 ./scripts/bootstrap/setup-dev.sh
 ```
-
