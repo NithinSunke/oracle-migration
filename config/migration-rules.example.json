@@ -1,14 +1,14 @@
 {
-  "rules_version": "1.0.1",
+  "rules_version": "2.0.0",
   "methods": [
     {
       "name": "DATAPUMP",
-      "base_score": 40,
+      "base_score": 45,
       "eligibility": [
         {
           "when": "source.oracle_version != null && target.oracle_version != null",
           "status": "ELIGIBLE",
-          "reason": "Oracle source and target provided"
+          "reason": "Logical migration path is available when source and target versions are known"
         }
       ],
       "positive_weights": [
@@ -33,26 +33,36 @@
           "reason": "Non-full-database migration favors logical tooling"
         },
         {
-          "when": "scope.migration_scope == 'FULL_DATABASE' && source.database_size_gb <= 500 && business.downtime_window_minutes >= 120",
+          "when": "facts.is_small_db == true && business.downtime_window_minutes >= 120",
           "points": 30,
-          "reason": "Small full database with generous downtime is a strong Data Pump candidate"
+          "reason": "Smaller databases with generous downtime are strong Data Pump candidates"
         },
         {
-          "when": "source.database_size_gb <= 100 && business.downtime_window_minutes >= 240",
-          "points": 20,
-          "reason": "Very small database and long outage window make export/import practical"
+          "when": "facts.upgrade_gap_present == true",
+          "points": 15,
+          "reason": "Version upgrade gaps are easier to absorb with logical export and import"
+        },
+        {
+          "when": "facts.cross_platform == true",
+          "points": 10,
+          "reason": "Cross-platform moves commonly favor logical migration"
         }
       ],
       "negative_weights": [
         {
-          "when": "source.database_size_gb >= 5000",
-          "points": 20,
-          "reason": "Large databases increase export and import risk"
+          "when": "facts.is_huge_db == true",
+          "points": 30,
+          "reason": "Very large databases increase export and import duration risk"
         },
         {
-          "when": "business.downtime_window_minutes <= 30",
+          "when": "facts.is_low_downtime == true",
           "points": 35,
           "reason": "Tight downtime window weakens Data Pump fit"
+        },
+        {
+          "when": "facts.tde_mismatch == true",
+          "points": 10,
+          "reason": "TDE mismatch adds extra wallet and encryption setup effort for logical migration"
         }
       ],
       "prerequisites": [
@@ -62,143 +72,8 @@
       ]
     },
     {
-      "name": "RMAN_BACKUP_RESTORE",
-      "base_score": 50,
-      "eligibility": [
-        {
-          "when": "scope.migration_scope == 'FULL_DATABASE'",
-          "status": "ELIGIBLE",
-          "reason": "Full database move supports physical restore"
-        },
-        {
-          "when": "scope.subset_only == true",
-          "status": "NOT_ELIGIBLE",
-          "reason": "Subset migration is not a fit for RMAN restore"
-        }
-      ],
-      "positive_weights": [
-        {
-          "when": "business.downtime_window_minutes >= 240",
-          "points": 25,
-          "reason": "Long outage window fits backup and restore"
-        },
-        {
-          "when": "source.database_size_gb >= 2000",
-          "points": 15,
-          "reason": "Large full database moves favor physical methods"
-        }
-      ],
-      "negative_weights": [
-        {
-          "when": "scope.need_schema_remap == true || scope.need_reorg == true",
-          "points": 30,
-          "reason": "Logical transformation weakens RMAN suitability"
-        },
-        {
-          "when": "business.downtime_window_minutes <= 30",
-          "points": 25,
-          "reason": "Low downtime requirement weakens backup and restore fit"
-        }
-      ],
-      "prerequisites": [
-        "Backup retention confirmed",
-        "Restore host sizing validated",
-        "File name conversion plan prepared"
-      ]
-    },
-    {
-      "name": "RMAN_DUPLICATE",
-      "base_score": 45,
-      "eligibility": [
-        {
-          "when": "scope.migration_scope == 'FULL_DATABASE'",
-          "status": "ELIGIBLE",
-          "reason": "Full database move supports duplication"
-        }
-      ],
-      "positive_weights": [
-        {
-          "when": "connectivity.direct_host_connectivity == true",
-          "points": 20,
-          "reason": "Direct connectivity supports active duplicate"
-        },
-        {
-          "when": "business.fallback_required == true",
-          "points": 10,
-          "reason": "Duplicate supports strong rehearsal workflow"
-        }
-      ],
-      "negative_weights": [
-        {
-          "when": "scope.subset_only == true",
-          "points": 40,
-          "reason": "Subset migration is not a fit for duplication"
-        }
-      ],
-      "prerequisites": [
-        "Auxiliary instance prepared",
-        "Password file and connectivity configured",
-        "Backup or active duplicate path validated"
-      ]
-    },
-    {
-      "name": "DATA_GUARD",
-      "base_score": 70,
-      "eligibility": [
-        {
-          "when": "scope.migration_scope == 'FULL_DATABASE' && scope.subset_only == false",
-          "status": "ELIGIBLE",
-          "reason": "Full database move supports standby strategy"
-        },
-        {
-          "when": "scope.need_schema_remap == true || scope.need_reorg == true",
-          "status": "NOT_ELIGIBLE",
-          "reason": "Logical transformation is not a fit for Data Guard"
-        }
-      ],
-      "positive_weights": [
-        {
-          "when": "business.near_zero_downtime_required == true",
-          "points": 25,
-          "reason": "Near-zero downtime strongly favors Data Guard"
-        },
-        {
-          "when": "business.fallback_required == true",
-          "points": 20,
-          "reason": "Fallback need favors switchover-based migration"
-        },
-        {
-          "when": "source.database_size_gb >= 5000",
-          "points": 15,
-          "reason": "Large databases favor physical sync methods"
-        }
-      ],
-      "negative_weights": [
-        {
-          "when": "features.need_cross_platform_move == true && target.same_endian == false",
-          "points": 25,
-          "reason": "Cross-platform complexity may block a simple standby path"
-        },
-        {
-          "when": "source.database_size_gb <= 500 && business.downtime_window_minutes >= 120 && business.near_zero_downtime_required == false",
-          "points": 20,
-          "reason": "Generous downtime for a small database reduces the need for Data Guard complexity"
-        },
-        {
-          "when": "target.target_is_exadata == true && features.zdm_supported_target == true",
-          "points": 35,
-          "reason": "Use ZDM orchestration for supported Exadata targets"
-        }
-      ],
-      "prerequisites": [
-        "ARCHIVELOG enabled",
-        "Standby redo logs configured",
-        "Network latency and throughput validated"
-      ]
-    },
-    {
       "name": "GOLDENGATE",
-      "base_score": 65,
+      "base_score": 62,
       "eligibility": [
         {
           "when": "features.goldengate_license_available == true",
@@ -213,37 +88,152 @@
       ],
       "positive_weights": [
         {
-          "when": "business.downtime_window_minutes <= 5",
-          "points": 30,
+          "when": "facts.is_ultra_low_downtime == true",
+          "points": 35,
           "reason": "Ultra-low downtime strongly favors GoldenGate"
         },
         {
-          "when": "source.daily_change_rate_gb >= 100",
+          "when": "facts.is_huge_db == true",
+          "points": 20,
+          "reason": "Very large databases favor replication-led cutover"
+        },
+        {
+          "when": "facts.upgrade_gap_present == true || facts.cross_platform == true",
           "points": 15,
+          "reason": "GoldenGate handles upgrade and heterogeneous cutover patterns well"
+        },
+        {
+          "when": "source.daily_change_rate_gb >= 100",
+          "points": 10,
           "reason": "High change rate supports continuous replication choice"
         }
       ],
       "negative_weights": [
         {
-          "when": "scope.need_schema_remap == true",
-          "points": 10,
-          "reason": "Transformation still needs separate logical handling"
-        },
-        {
           "when": "scope.subset_only == true || scope.need_schema_remap == true || scope.need_reorg == true",
-          "points": 35,
-          "reason": "Subset or logical transformation weakens GoldenGate as the primary migration method"
+          "points": 30,
+          "reason": "Subset or transformation requirements weaken GoldenGate as the primary migration path"
         },
         {
           "when": "business.downtime_window_minutes >= 240",
           "points": 15,
-          "reason": "Long outage windows reduce need for GoldenGate complexity"
+          "reason": "Long outage windows reduce the need for GoldenGate complexity"
         }
       ],
       "prerequisites": [
         "Supplemental logging validated",
         "GoldenGate deployment prepared",
         "Initial load strategy defined"
+      ]
+    },
+    {
+      "name": "RMAN_TRANSPORT",
+      "base_score": 58,
+      "eligibility": [
+        {
+          "when": "facts.full_database_move == true && facts.same_platform == true && facts.same_version_family == true",
+          "status": "ELIGIBLE",
+          "reason": "Full database physical transport aligns best when platform and version family match"
+        },
+        {
+          "when": "facts.full_database_move == true && facts.same_platform == true && facts.version_gap_major == 1",
+          "status": "CONDITIONALLY_ELIGIBLE",
+          "reason": "A one-version-family gap may still be workable with careful RMAN transport planning"
+        },
+        {
+          "when": "facts.full_database_move == false || facts.same_platform == false",
+          "status": "NOT_ELIGIBLE",
+          "reason": "RMAN transport is intended for full-database moves on the same platform"
+        }
+      ],
+      "positive_weights": [
+        {
+          "when": "facts.is_large_db == true",
+          "points": 20,
+          "reason": "Large databases favor physical transport over logical unload and reload"
+        },
+        {
+          "when": "business.downtime_window_minutes >= 180",
+          "points": 20,
+          "reason": "A moderate-to-long outage window fits backup and restore style transport"
+        },
+        {
+          "when": "facts.tde_enabled == true && facts.tde_mismatch == false",
+          "points": 10,
+          "reason": "Aligned TDE posture keeps physical encrypted transport viable"
+        }
+      ],
+      "negative_weights": [
+        {
+          "when": "facts.is_low_downtime == true",
+          "points": 20,
+          "reason": "Tighter downtime windows reduce the fit for downtime-based physical transport"
+        },
+        {
+          "when": "facts.major_upgrade_gap == true",
+          "points": 25,
+          "reason": "Large version gaps weaken RMAN transport suitability"
+        }
+      ],
+      "prerequisites": [
+        "Backup retention confirmed",
+        "Restore host sizing validated",
+        "File name conversion plan prepared"
+      ]
+    },
+    {
+      "name": "XTTS",
+      "base_score": 55,
+      "eligibility": [
+        {
+          "when": "facts.full_database_move == true && facts.cross_platform_same_endian == true",
+          "status": "ELIGIBLE",
+          "reason": "Cross-platform same-endian moves can use XTTS"
+        },
+        {
+          "when": "facts.full_database_move == false || facts.same_endian == false",
+          "status": "NOT_ELIGIBLE",
+          "reason": "XTTS is intended for transportable full-database style moves on compatible endian formats"
+        }
+      ],
+      "positive_weights": [
+        {
+          "when": "facts.is_large_db == true",
+          "points": 20,
+          "reason": "Large databases often justify transportable tablespace techniques"
+        },
+        {
+          "when": "facts.cross_platform_same_endian == true",
+          "points": 20,
+          "reason": "Cross-platform same-endian alignment is a strong XTTS signal"
+        },
+        {
+          "when": "facts.tde_enabled == true && facts.tde_mismatch == false",
+          "points": 15,
+          "reason": "Aligned TDE posture helps transportable tablespace execution"
+        }
+      ],
+      "negative_weights": [
+        {
+          "when": "facts.major_upgrade_gap == true",
+          "points": 20,
+          "reason": "Large version gaps increase XTTS planning complexity"
+        },
+        {
+          "when": "facts.is_low_downtime == true",
+          "points": 20,
+          "reason": "Tight downtime windows can weaken an XTTS-led offline move"
+        },
+        {
+          "when": "scope.need_schema_remap == true || scope.need_reorg == true",
+          "points": 20,
+          "reason": "Logical transformation requirements weaken XTTS suitability"
+        }
+      ],
+      "prerequisites": [
+        "Transportable tablespace self-containment validated",
+        "Endian conversion workflow prepared",
+        "Incremental roll-forward plan tested"
       ]
     },
     {
@@ -263,26 +253,36 @@
       ],
       "positive_weights": [
         {
-          "when": "business.near_zero_downtime_required == true",
-          "points": 15,
+          "when": "business.near_zero_downtime_required == true || facts.is_low_downtime == true",
+          "points": 20,
           "reason": "ZDM is stronger when low-downtime orchestration matters"
         },
         {
           "when": "target.target_is_exadata == true && features.zdm_supported_target == true",
           "points": 35,
-          "reason": "Supported Exadata target strongly favors ZDM"
+          "reason": "Supported target strongly favors ZDM orchestration"
         },
         {
-          "when": "scope.migration_scope == 'FULL_DATABASE'",
-          "points": 10,
+          "when": "facts.full_database_move == true",
+          "points": 15,
           "reason": "Full database migrations align well with ZDM orchestration"
+        },
+        {
+          "when": "facts.tde_enabled == true",
+          "points": 10,
+          "reason": "ZDM planning is valuable when encryption and wallet handling are in scope"
         }
       ],
       "negative_weights": [
         {
-          "when": "source.database_size_gb < 500",
+          "when": "facts.is_small_db == true",
           "points": 10,
           "reason": "Small migrations may not justify ZDM complexity"
+        },
+        {
+          "when": "scope.need_schema_remap == true || scope.need_reorg == true || scope.subset_only == true",
+          "points": 20,
+          "reason": "ZDM is a weaker fit when the move needs logical transformation"
         }
       ],
       "prerequisites": [

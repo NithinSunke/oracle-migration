@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import socket
+import ssl
 import shutil
 import subprocess
 from os import X_OK, access
@@ -17,6 +19,9 @@ from backend.app.core.config import settings
 from backend.app.schemas.migration import OracleConnectionConfig
 from backend.app.schemas.transfer import (
     DataPumpCommandPreview,
+    DataPumpConnectivityDiagnosticCheck,
+    DataPumpConnectivityDiagnosticsResponse,
+    DataPumpFailureAnalysis,
     DataPumpJobCreate,
     DataPumpJobOptions,
     DataPumpResolvedBackend,
@@ -165,6 +170,7 @@ class OracleDataPumpAdapter:
                 "output_log": full_log,
                 "oracle_log_lines": [],
                 "artifact_paths": [str(plan_path)],
+                "failure_analysis": None,
             }
 
         backend = self._resolve_execution_backend(request)
@@ -183,6 +189,280 @@ class OracleDataPumpAdapter:
             work_dir=work_dir,
             artifact_paths=[str(plan_path)],
         )
+
+    def analyze_failure(self, result_payload: dict[str, object]) -> DataPumpFailureAnalysis | None:
+        lines = [
+            *[str(item) for item in result_payload.get("output_log", []) if item],
+            *[str(item) for item in result_payload.get("oracle_log_lines", []) if item],
+        ]
+        if not lines:
+            return None
+
+        joined = "\n".join(lines)
+        error_code_match = re.search(r"(ORA-\d{5}|UDI-\d{5})", joined)
+        failed_error_code = error_code_match.group(1) if error_code_match else None
+        failed_stage = "EXECUTION"
+        failed_object: str | None = None
+        failed_owner: str | None = None
+        retry_notes: list[str] = []
+        suggested_parameter_changes: list[str] = []
+        summary = "Review the full Data Pump log to identify the exact failed object and retry safely."
+
+        object_match = re.search(
+            r'ORA-31693: Table data object "(?P<owner>[^"]+)"\."(?P<object>[^"]+)" failed',
+            joined,
+        )
+        if not object_match:
+            object_match = re.search(
+                r'Object type [^:]+:"(?P<owner>[^"]+)"\."(?P<object>[^"]+)"',
+                joined,
+            )
+        if object_match:
+            failed_owner = object_match.group("owner")
+            failed_object = object_match.group("object")
+            summary = (
+                f"Data Pump failed while processing {failed_owner}.{failed_object}. "
+                "Review object-specific errors before retrying."
+            )
+
+        if "ORA-29024" in joined:
+            failed_stage = "OBJECT_STORAGE_TLS"
+            summary = "Object Storage certificate validation failed during dump or log file access."
+            retry_notes.append("Validate the worker or database wallet trust chain before retrying.")
+            suggested_parameter_changes.append("Review object storage credential, URI, and wallet/certificate configuration.")
+        elif "ORA-31640" in joined or "ORA-17503" in joined:
+            failed_stage = "DUMPFILE_ACCESS"
+            summary = "The dump file could not be opened during Data Pump execution."
+            retry_notes.append("Verify DUMPFILE path or URI, DIRECTORY object mapping, and file permissions.")
+            suggested_parameter_changes.append("Correct DUMPFILE or DIRECTORY in the parfile before retrying.")
+        elif "ORA-39087" in joined or "ORA-39070" in joined:
+            failed_stage = "LOG_DIRECTORY"
+            summary = "Oracle could not open the Data Pump log file in the selected DIRECTORY object."
+            retry_notes.append("Validate DIRECTORY object existence and WRITE grants on the target.")
+            suggested_parameter_changes.append("Correct DIRECTORY and LOGFILE settings before retrying.")
+        elif "ORA-00959" in joined:
+            failed_stage = "TARGET_TABLESPACE"
+            summary = "Import failed because a required target tablespace does not exist."
+            retry_notes.append("Create missing permanent or temporary tablespaces before retrying the import.")
+            suggested_parameter_changes.append("Pre-create the missing target tablespace and keep TABLE_EXISTS_ACTION unchanged.")
+        elif "ORA-01917" in joined or "ORA-01918" in joined:
+            failed_stage = "TARGET_SCHEMA"
+            summary = "Import failed because a required schema, user, or role was missing on the target."
+            retry_notes.append("Run target preparation scripts for schemas, roles, quotas, and grants before retrying.")
+            suggested_parameter_changes.append("Create the missing target principal or adjust REMAP_SCHEMA before retrying.")
+        elif "ORA-24247" in joined:
+            failed_stage = "NETWORK_ACL"
+            summary = "A network ACL blocked the required HTTP or Object Storage access."
+            retry_notes.append("Review ACL grants for the database user running Data Pump or UTL_HTTP operations.")
+            suggested_parameter_changes.append("Apply ACL grants for the target hostname before retrying.")
+        elif "ORA-39126" in joined or "ORA-39083" in joined:
+            failed_stage = "OBJECT_IMPORT"
+            summary = "Oracle reported an object-level import failure. Review the exact object and dependent prerequisites."
+            retry_notes.append("Inspect failed object details in the Oracle log and correct target-side prerequisites.")
+        elif "ORA-12514" in joined or "ORA-12541" in joined or "DPY-6001" in joined:
+            failed_stage = "CONNECTIVITY"
+            summary = "The Oracle listener or service name could not be reached during execution."
+            retry_notes.append("Validate listener reachability, DNS, service name, and host-to-container path before retrying.")
+
+        return DataPumpFailureAnalysis(
+            failed_stage=failed_stage,
+            failed_object=failed_object,
+            failed_owner=failed_owner,
+            failed_error_code=failed_error_code,
+            summary=summary,
+            retry_notes=retry_notes,
+            suggested_parameter_changes=suggested_parameter_changes,
+        )
+
+    def run_connectivity_diagnostics(
+        self,
+        *,
+        source_connection: OracleConnectionConfig | None,
+        target_connection: OracleConnectionConfig | None,
+        object_storage: DataPumpJobOptions.ObjectStorageConfig | None,
+    ) -> DataPumpConnectivityDiagnosticsResponse:
+        checks: list[DataPumpConnectivityDiagnosticCheck] = []
+
+        if source_connection is not None:
+            checks.extend(self._connection_diagnostics("SOURCE", source_connection))
+        if target_connection is not None:
+            checks.extend(self._connection_diagnostics("TARGET", target_connection))
+        if object_storage is not None:
+            checks.extend(self._object_storage_diagnostics(object_storage))
+            if target_connection is not None:
+                checks.append(self._acl_diagnostic(target_connection, object_storage))
+
+        if not checks:
+            checks.append(
+                DataPumpConnectivityDiagnosticCheck(
+                    code="NO_INPUT",
+                    label="No diagnostics input",
+                    status="WARN",
+                    detail="Provide at least one Oracle connection or object storage target to run diagnostics.",
+                )
+            )
+
+        summary = (
+            f"{sum(1 for item in checks if item.status == 'PASS')} passed, "
+            f"{sum(1 for item in checks if item.status == 'WARN')} warnings, "
+            f"{sum(1 for item in checks if item.status == 'FAIL')} failed checks."
+        )
+        return DataPumpConnectivityDiagnosticsResponse(summary=summary, checks=checks)
+
+    def _connection_diagnostics(
+        self,
+        label: str,
+        connection: OracleConnectionConfig,
+    ) -> list[DataPumpConnectivityDiagnosticCheck]:
+        checks: list[DataPumpConnectivityDiagnosticCheck] = []
+        host = connection.host.strip()
+        port = int(connection.port)
+
+        try:
+            resolved = socket.gethostbyname_ex(host)
+            checks.append(
+                DataPumpConnectivityDiagnosticCheck(
+                    code=f"{label}_DNS",
+                    label=f"{label.title()} DNS resolution",
+                    status="PASS",
+                    detail=f"{host} resolved to {', '.join(resolved[2]) or 'no returned addresses'}.",
+                )
+            )
+        except OSError as exc:
+            checks.append(
+                DataPumpConnectivityDiagnosticCheck(
+                    code=f"{label}_DNS",
+                    label=f"{label.title()} DNS resolution",
+                    status="FAIL",
+                    detail=f"{host} could not be resolved from the backend runtime: {exc}.",
+                )
+            )
+            return checks
+
+        try:
+            with socket.create_connection((host, port), timeout=5):
+                checks.append(
+                    DataPumpConnectivityDiagnosticCheck(
+                        code=f"{label}_LISTENER",
+                        label=f"{label.title()} listener reachability",
+                        status="PASS",
+                        detail=f"{host}:{port} accepted a TCP connection from the backend runtime.",
+                    )
+                )
+        except OSError as exc:
+            checks.append(
+                DataPumpConnectivityDiagnosticCheck(
+                    code=f"{label}_LISTENER",
+                    label=f"{label.title()} listener reachability",
+                    status="FAIL",
+                    detail=f"{host}:{port} was not reachable from the backend runtime: {exc}.",
+                )
+            )
+
+        checks.append(
+            DataPumpConnectivityDiagnosticCheck(
+                code=f"{label}_PATH",
+                label=f"{label.title()} host-to-container path",
+                status="INFO",
+                detail="This check was executed from the backend container/runtime path, not from the browser.",
+            )
+        )
+        return checks
+
+    def _object_storage_diagnostics(
+        self,
+        config: DataPumpJobOptions.ObjectStorageConfig,
+    ) -> list[DataPumpConnectivityDiagnosticCheck]:
+        host = f"objectstorage.{config.region}.oraclecloud.com"
+        checks: list[DataPumpConnectivityDiagnosticCheck] = []
+
+        try:
+            resolved = socket.gethostbyname_ex(host)
+            checks.append(
+                DataPumpConnectivityDiagnosticCheck(
+                    code="OBJSTORE_DNS",
+                    label="Object Storage DNS resolution",
+                    status="PASS",
+                    detail=f"{host} resolved to {', '.join(resolved[2]) or 'no returned addresses'}.",
+                )
+            )
+        except OSError as exc:
+            checks.append(
+                DataPumpConnectivityDiagnosticCheck(
+                    code="OBJSTORE_DNS",
+                    label="Object Storage DNS resolution",
+                    status="FAIL",
+                    detail=f"{host} could not be resolved from the backend runtime: {exc}.",
+                )
+            )
+            return checks
+
+        try:
+            with socket.create_connection((host, 443), timeout=5) as sock:
+                context = ssl.create_default_context()
+                with context.wrap_socket(sock, server_hostname=host) as tls_sock:
+                    cert = tls_sock.getpeercert()
+                    subject = cert.get("subject", [])
+                    subject_text = subject[0][0][1] if subject and subject[0] else host
+                    checks.append(
+                        DataPumpConnectivityDiagnosticCheck(
+                            code="OBJSTORE_TLS",
+                            label="Object Storage TLS handshake",
+                            status="PASS",
+                            detail=f"TLS handshake to {host}:443 succeeded. Certificate subject: {subject_text}.",
+                        )
+                    )
+        except OSError as exc:
+            checks.append(
+                DataPumpConnectivityDiagnosticCheck(
+                    code="OBJSTORE_TLS",
+                    label="Object Storage TLS handshake",
+                    status="FAIL",
+                    detail=f"TLS connection to {host}:443 failed from the backend runtime: {exc}.",
+                )
+            )
+        return checks
+
+    def _acl_diagnostic(
+        self,
+        connection: OracleConnectionConfig,
+        config: DataPumpJobOptions.ObjectStorageConfig,
+    ) -> DataPumpConnectivityDiagnosticCheck:
+        host = f"objectstorage.{config.region}.oraclecloud.com"
+        try:
+            with self._client_factory(connection).connect() as db_connection:
+                cursor = db_connection.cursor()
+                cursor.execute(
+                    """
+                    select host, lower_port, upper_port, privilege
+                    from dba_host_aces
+                    where host = :host
+                      and principal in (upper(:principal), 'PUBLIC')
+                    """,
+                    host=host,
+                    principal=connection.username.strip(),
+                )
+                rows = cursor.fetchall()
+                if rows:
+                    return DataPumpConnectivityDiagnosticCheck(
+                        code="TARGET_ACL",
+                        label="Target ACL check",
+                        status="PASS",
+                        detail=f"Found {len(rows)} ACL entry or entries for {host} visible to {connection.username}.",
+                    )
+                return DataPumpConnectivityDiagnosticCheck(
+                    code="TARGET_ACL",
+                    label="Target ACL check",
+                    status="WARN",
+                    detail=f"No visible ACL entries were found for {host} for {connection.username} or PUBLIC.",
+                )
+        except Exception as exc:
+            return DataPumpConnectivityDiagnosticCheck(
+                code="TARGET_ACL",
+                label="Target ACL check",
+                status="WARN",
+                detail=f"ACL lookup could not be completed with the supplied target connection: {exc}.",
+            )
 
     def _build_parameter_lines(
         self,
@@ -209,8 +489,10 @@ class OracleDataPumpAdapter:
 
         if request.scope == "FULL":
             lines.append("FULL=Y")
-        else:
+        elif request.scope == "SCHEMA":
             lines.append(f"SCHEMAS={','.join(options.schemas)}")
+        else:
+            lines.append(f"TABLES={','.join(options.tables)}")
 
         if request.operation == "IMPORT":
             lines.append(f"TABLE_EXISTS_ACTION={options.table_exists_action}")
@@ -1061,6 +1343,34 @@ class OracleDataPumpAdapter:
                 handle=handle,
                 schema_expr=self._schema_expression(request.options.schemas),
             )
+        elif request.scope == "TABLE":
+            cursor.execute(
+                """
+                BEGIN
+                  DBMS_DATAPUMP.METADATA_FILTER(
+                    handle => :handle,
+                    name => 'NAME_EXPR',
+                    value => :table_expr,
+                    object_path => 'TABLE'
+                  );
+                END;
+                """,
+                handle=handle,
+                table_expr=self._table_name_expression(request.options.tables),
+            )
+            cursor.execute(
+                """
+                BEGIN
+                  DBMS_DATAPUMP.METADATA_FILTER(
+                    handle => :handle,
+                    name => 'SCHEMA_EXPR',
+                    value => :schema_expr
+                  );
+                END;
+                """,
+                handle=handle,
+                schema_expr=self._schema_expression(self._table_owner_list(request.options.tables)),
+            )
 
         if request.options.exclude_statistics:
             cursor.execute(
@@ -1182,6 +1492,34 @@ class OracleDataPumpAdapter:
             if not normalized:
                 continue
             values.append("'" + normalized.replace("'", "''") + "'")
+        quoted = ",".join(values)
+        return f"IN ({quoted})"
+
+    @staticmethod
+    def _table_owner_list(tables: list[str]) -> list[str]:
+        owners: list[str] = []
+        for table in tables:
+            normalized = table.strip().upper()
+            if "." not in normalized:
+                continue
+            owner, _ = normalized.split(".", 1)
+            owner = owner.strip()
+            if owner and owner not in owners:
+                owners.append(owner)
+        return owners
+
+    @staticmethod
+    def _table_name_expression(tables: list[str]) -> str:
+        values: list[str] = []
+        for table in tables:
+            normalized = table.strip().upper()
+            if not normalized:
+                continue
+            object_name = normalized.split(".", 1)[1] if "." in normalized else normalized
+            object_name = object_name.strip()
+            if not object_name:
+                continue
+            values.append("'" + object_name.replace("'", "''") + "'")
         quoted = ",".join(values)
         return f"IN ({quoted})"
 

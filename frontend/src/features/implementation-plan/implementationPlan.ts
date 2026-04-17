@@ -258,6 +258,175 @@ function buildPostCutoverValidationSql(migration: MigrationRecord): Implementati
   };
 }
 
+function buildApplicationCutoverChecklist(
+  migration: MigrationRecord,
+  recommendation: RecommendationResponse,
+): ImplementationRunbookCommand {
+  const primarySchema = getPrimarySchemaHint(migration);
+  const schemaLabel = primarySchema === "<schema_list>" ? "<schema_list>" : primarySchema;
+  const method = formatApproach(recommendation.recommended_approach);
+
+  return {
+    title: "Application cutover checklist",
+    description:
+      "Use this phase-wise checklist to drive the final change window across application, DBA, and business owners.",
+    language: "text",
+    filename: "application_cutover_checklist.txt",
+    content: [
+      "Phase 1 - Pre-check",
+      "1. Confirm approved migration method, downtime window, fallback owner, and communication bridge.",
+      "2. Re-run source and target login tests, readiness checks, and storage/path validations.",
+      "3. Verify target preparation approval gates are signed off for schemas, tablespaces, roles, quotas, and grants.",
+      "",
+      "Phase 2 - Application freeze",
+      "1. Freeze application changes and stop release activity.",
+      "2. Disable schedulers, inbound jobs, ETL feeds, batch chains, and external integrations that can mutate data.",
+      "3. Record the business freeze timestamp and owning approver.",
+      "",
+      "Phase 3 - Job stop and source quiesce",
+      "1. Stop database-side scheduler jobs, replication feeds, DB links, and middleware workers that should not run during cutover.",
+      "2. Capture final source-side invalid object count, active sessions, and any long-running transactions.",
+      "3. Confirm the source dataset is stable for final execution.",
+      "",
+      `Phase 4 - Final ${method} execution`,
+      `1. Execute the approved export/import or transport step for ${schemaLabel}.`,
+      "2. Capture full logs, timings, parfile/parameter evidence, and operator notes.",
+      "3. If the step fails, hold the bridge, review the exact failed stage, and apply only approved retry corrections.",
+      "",
+      "Phase 5 - Import completion and technical validation",
+      "1. Refresh optimizer statistics for migrated schemas or affected application objects.",
+      "2. Recompile invalid objects and record any remaining compilation failures.",
+      "3. Run post-import validation for object counts, schema size, grants, synonyms, sequences, and compile status.",
+      "",
+      "Phase 6 - Smoke test",
+      "1. Execute agreed application smoke tests against the target environment.",
+      "2. Validate connectivity, critical business flows, and external integration endpoints.",
+      "3. Record evidence for each passed or failed smoke test.",
+      "",
+      "Phase 7 - Business signoff",
+      "1. Review technical validation and smoke-test evidence with business owners.",
+      "2. Obtain production acceptance or trigger the approved fallback plan.",
+      "3. Record the final cutover decision, signoff timestamp, and post-cutover monitoring owner.",
+    ].join("\n"),
+  };
+}
+
+function buildObjectLevelPostImportValidation(
+  migration: MigrationRecord,
+): ImplementationRunbookCommand {
+  const schemaPredicate =
+    migration.scope.migration_scope === "FULL_DATABASE"
+      ? ""
+      : getPrimarySchemaHint(migration) === "<schema_list>"
+        ? "  and owner in (<schema_list>)"
+        : `  and owner in ('${getPrimarySchemaHint(migration)}')`;
+
+  return {
+    title: "Object-level post-import validation SQL",
+    description:
+      "Run this SQL on source and target, capture both outputs, and compare them as cutover evidence.",
+    language: "bash",
+    filename: "object_level_post_import_validation.sh",
+    content: [
+      "sqlplus -L \"${SRC_CONNECT_STRING}\" <<'SQL' > source_object_validation.txt",
+      "set pages 300 lines 240 trimspool on",
+      "prompt === OBJECT COUNTS ===",
+      "select owner, object_type, count(*)",
+      "from dba_objects",
+      "where owner not in ('SYS','SYSTEM')",
+      schemaPredicate,
+      "group by owner, object_type",
+      "order by owner, object_type;",
+      "prompt === INVALID OBJECTS ===",
+      "select owner, count(*) invalid_objects",
+      "from dba_objects",
+      "where status <> 'VALID'",
+      schemaPredicate,
+      "group by owner",
+      "order by owner;",
+      "prompt === SEGMENT SIZE MB ===",
+      "select owner, round(sum(bytes)/1024/1024,2) size_mb",
+      "from dba_segments",
+      "where owner not in ('SYS','SYSTEM')",
+      schemaPredicate,
+      "group by owner",
+      "order by owner;",
+      "prompt === GRANTS ===",
+      "select owner, count(*) object_grants",
+      "from dba_tab_privs",
+      "where owner not in ('SYS','SYSTEM')",
+      schemaPredicate,
+      "group by owner",
+      "order by owner;",
+      "prompt === SYNONYMS ===",
+      "select owner, count(*) synonym_count",
+      "from dba_synonyms",
+      "where owner not in ('SYS','SYSTEM')",
+      schemaPredicate,
+      "group by owner",
+      "order by owner;",
+      "prompt === SEQUENCES ===",
+      "select sequence_owner, count(*) sequence_count",
+      "from dba_sequences",
+      "where sequence_owner not in ('SYS','SYSTEM')",
+      schemaPredicate.replace("owner", "sequence_owner"),
+      "group by sequence_owner",
+      "order by sequence_owner;",
+      "SQL",
+      "",
+      "sqlplus -L \"${TGT_CONNECT_STRING}\" <<'SQL' > target_object_validation.txt",
+      "set pages 300 lines 240 trimspool on",
+      "prompt === OBJECT COUNTS ===",
+      "select owner, object_type, count(*)",
+      "from dba_objects",
+      "where owner not in ('SYS','SYSTEM')",
+      schemaPredicate,
+      "group by owner, object_type",
+      "order by owner, object_type;",
+      "prompt === INVALID OBJECTS ===",
+      "select owner, count(*) invalid_objects",
+      "from dba_objects",
+      "where status <> 'VALID'",
+      schemaPredicate,
+      "group by owner",
+      "order by owner;",
+      "prompt === SEGMENT SIZE MB ===",
+      "select owner, round(sum(bytes)/1024/1024,2) size_mb",
+      "from dba_segments",
+      "where owner not in ('SYS','SYSTEM')",
+      schemaPredicate,
+      "group by owner",
+      "order by owner;",
+      "prompt === GRANTS ===",
+      "select owner, count(*) object_grants",
+      "from dba_tab_privs",
+      "where owner not in ('SYS','SYSTEM')",
+      schemaPredicate,
+      "group by owner",
+      "order by owner;",
+      "prompt === SYNONYMS ===",
+      "select owner, count(*) synonym_count",
+      "from dba_synonyms",
+      "where owner not in ('SYS','SYSTEM')",
+      schemaPredicate,
+      "group by owner",
+      "order by owner;",
+      "prompt === SEQUENCES ===",
+      "select sequence_owner, count(*) sequence_count",
+      "from dba_sequences",
+      "where sequence_owner not in ('SYS','SYSTEM')",
+      schemaPredicate.replace("owner", "sequence_owner"),
+      "group by sequence_owner",
+      "order by sequence_owner;",
+      "SQL",
+      "",
+      "diff -u source_object_validation.txt target_object_validation.txt || true",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  };
+}
+
 function buildDataPumpSection(
   migration: MigrationRecord,
   requestSlug: string,
@@ -495,9 +664,9 @@ function buildRmanSection(
   const duplicateTarget = targetDbName.toUpperCase() || "<target_db_name>";
 
   return {
-    title: "Implementation Runbook",
+    title: "RMAN Transport Runbook",
     description:
-      "Use these RMAN-oriented commands when the recommendation is backup, restore, or duplicate based.",
+      "Use these RMAN-oriented commands when the recommendation is a physical transport path based on backup, restore, and database open validation.",
     commands: [
       {
         title: "RMAN source validation",
@@ -515,16 +684,31 @@ function buildRmanSection(
         ].join("\n"),
       },
       {
-        title: "RMAN duplicate command",
+        title: "RMAN backup transport command",
         description:
-          `Duplicate ${sourceDbName || "<source_db_name>"} to ${duplicateTarget} using the collected source and target connection endpoints.`,
+          `Create the backup pieces for transporting ${sourceDbName || "<source_db_name>"} into ${duplicateTarget} using the collected source and target connection endpoints.`,
         language: "bash",
-        filename: `${migration.request_id.toLowerCase()}_rman_duplicate.rman`,
+        filename: `${migration.request_id.toLowerCase()}_rman_transport.rman`,
         content: [
-          "rman target \"${SRC_CONNECT_STRING}\" auxiliary \"${TGT_CONNECT_STRING}\" <<'RMAN'",
-          `duplicate target database to '${duplicateTarget}'`,
-          "  from active database",
-          "  nofilenamecheck;",
+          "rman target \"${SRC_CONNECT_STRING}\" <<'RMAN'",
+          "backup as compressed backupset database plus archivelog",
+          "  format '/u02/rman/" + migration.request_id.toLowerCase() + "/%U.bkp';",
+          "exit",
+          "RMAN",
+        ].join("\n"),
+      },
+      {
+        title: "RMAN restore and recover placeholder",
+        description:
+          "Use this skeleton on the target host after copying backup pieces and finalizing file name conversion details.",
+        language: "bash",
+        filename: `${migration.request_id.toLowerCase()}_rman_restore.rman`,
+        content: [
+          "rman target \"${TGT_CONNECT_STRING}\" <<'RMAN'",
+          "catalog start with '/u02/rman/" + migration.request_id.toLowerCase() + "/';",
+          "restore database;",
+          "recover database;",
+          "alter database open resetlogs;",
           "exit",
           "RMAN",
         ].join("\n"),
@@ -540,6 +724,71 @@ function buildRmanSection(
           "select name, open_mode, database_role, log_mode from v$database;",
           "select instance_name, host_name, version from v$instance;",
           "SQL",
+        ].join("\n"),
+      },
+    ],
+  };
+}
+
+function buildXttsSection(
+  migration: MigrationRecord,
+  sourceDbName: string,
+  targetDbName: string,
+): ImplementationRunbookSection {
+  const requestSlug = slugify(migration.request_id || sourceDbName || "xtts");
+  return {
+    title: "XTTS Runbook",
+    description:
+      "Use these XTTS-oriented commands when cross-platform same-endian movement favors transportable tablespaces with incremental roll-forward.",
+    commands: [
+      {
+        title: "XTTS self-containment precheck",
+        description:
+          "Check that the transportable set is self-contained before beginning the XTTS workflow.",
+        language: "sql",
+        filename: `${requestSlug}_xtts_precheck.sql`,
+        content: [
+          "execute dbms_tts.transport_set_check(ts_list => '<tablespace_list>', incl_constraints => true);",
+          "select * from transport_set_violations;",
+        ].join("\n"),
+      },
+      {
+        title: "XTTS incremental backup",
+        description:
+          `Create the XTTS incremental backup pieces for ${sourceDbName || "<source_db_name>"}.`,
+        language: "bash",
+        filename: `${requestSlug}_xtts_backup.rman`,
+        content: [
+          "rman target \"${SRC_CONNECT_STRING}\" <<'RMAN'",
+          "backup incremental level 0 tablespace <tablespace_list>",
+          "  format '/u02/xtts/" + requestSlug + "/xtts_%U.bkp';",
+          "exit",
+          "RMAN",
+        ].join("\n"),
+      },
+      {
+        title: "XTTS metadata export",
+        description:
+          `Export transportable metadata for import into ${targetDbName || "<target_db_name>"}.`,
+        language: "bash",
+        filename: `${requestSlug}_xtts_metadata.sh`,
+        content: [
+          "expdp \"${SRC_CONNECT_STRING}\" transport_tablespaces=<tablespace_list> \\",
+          "  directory=DATA_PUMP_DIR dumpfile=" + requestSlug + "_xtts_metadata.dmp \\",
+          "  logfile=" + requestSlug + "_xtts_metadata.log",
+        ].join("\n"),
+      },
+      {
+        title: "XTTS target import",
+        description:
+          "Import the transported metadata after datafiles are copied and converted on the target.",
+        language: "bash",
+        filename: `${requestSlug}_xtts_import.sh`,
+        content: [
+          "impdp \"${TGT_CONNECT_STRING}\" directory=DATA_PUMP_DIR \\",
+          "  dumpfile=" + requestSlug + "_xtts_metadata.dmp \\",
+          "  logfile=" + requestSlug + "_xtts_import.log \\",
+          "  transport_datafiles='<target_datafile_list>'",
         ].join("\n"),
       },
     ],
@@ -940,14 +1189,14 @@ function buildMethodSection(
   switch (getApproachKey(recommendation.recommended_approach)) {
     case "DATAPUMP":
       return buildDataPumpSection(migration, requestSlug);
-    case "RMAN":
+    case "RMAN_TRANSPORT":
       return buildRmanSection(migration, sourceDbName, targetDbName);
     case "GOLDENGATE":
       return buildGoldenGateSection(sourceDbName, targetDbName);
+    case "XTTS":
+      return buildXttsSection(migration, sourceDbName, targetDbName);
     case "ZDM":
       return buildZdmSection(sourceDbName, targetDbName);
-    case "DATA_GUARD":
-      return buildDataGuardSection(migration, sourceDbName, targetDbName);
     default:
       return {
         title: "Implementation Runbook",
@@ -1007,6 +1256,18 @@ function getDocuments(
       description:
         "Contains post-migration checks for invalid objects, role, open mode, and smoke-test evidence capture.",
     },
+    {
+      title: "Application cutover checklist",
+      filename: `${requestSlug}_application_cutover_checklist.txt`,
+      description:
+        "Tracks app freeze, job stop, final execution, stats, recompilation, smoke test, and business signoff in the change window.",
+    },
+    {
+      title: "Object-level post-import validation",
+      filename: `${requestSlug}_object_level_post_import_validation.sql`,
+      description:
+        "Captures source-versus-target evidence for object counts, invalid objects, schema sizes, grants, synonyms, sequences, and compile status.",
+    },
   ];
 
   switch (getApproachKey(recommendation.recommended_approach)) {
@@ -1018,12 +1279,12 @@ function getDocuments(
           "Package the export and import parameter files, directory SQL, and transfer checklist together for CAB execution.",
       });
       break;
-    case "RMAN":
+    case "RMAN_TRANSPORT":
       docs.push({
-        title: "RMAN duplicate script",
-        filename: `${requestSlug}_rman_duplicate.rman`,
+        title: "RMAN transport script",
+        filename: `${requestSlug}_rman_transport.rman`,
         description:
-          "Stores the duplicate or restore command file aligned to the exact source and target service names.",
+          "Stores the backup and restore command files aligned to the exact source and target service names.",
       });
       break;
     case "GOLDENGATE":
@@ -1034,20 +1295,20 @@ function getDocuments(
           "Stores Microservices credential aliases, REST setup scripts, Extract and Replicat parameter files, and lag checkpoints.",
       });
       break;
+    case "XTTS":
+      docs.push({
+        title: "XTTS command pack",
+        filename: `${requestSlug}_xtts_pack.zip`,
+        description:
+          "Stores XTTS precheck SQL, incremental backup commands, metadata export, and target import steps.",
+      });
+      break;
     case "ZDM":
       docs.push({
         title: "ZDM response file",
         filename: `${requestSlug}_zdm_migration.rsp`,
         description:
           "Stores the ZDM response file populated with the collected host, service, and database names.",
-      });
-      break;
-    case "DATA_GUARD":
-      docs.push({
-        title: "Data Guard broker script",
-        filename: `${requestSlug}_broker_commands.txt`,
-        description:
-          "Stores broker configuration, validation, and switchover commands matched to the source and target DB names.",
       });
       break;
   }
@@ -1139,7 +1400,16 @@ export function buildImplementationPlan(
       title: "Post-Cutover Validation",
       description:
         "Run these checks immediately after the migration step completes so object validity, database role, and smoke-test evidence are recorded in the same change window.",
-      commands: [buildPostCutoverValidationSql(migration)],
+      commands: [
+        buildPostCutoverValidationSql(migration),
+        buildObjectLevelPostImportValidation(migration),
+      ],
+    },
+    {
+      title: "Fallback And Cutover Checklist",
+      description:
+        "Use this checklist during the final change window to coordinate the application freeze, technical execution, fallback readiness, and business signoff.",
+      commands: [buildApplicationCutoverChecklist(migration, recommendation)],
     },
   ];
 

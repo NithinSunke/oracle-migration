@@ -44,6 +44,51 @@ def _add_missing_json_column(table_name: str, column_name: str) -> None:
         connection.execute(text(ddl))
 
 
+def _add_missing_boolean_column(
+    table_name: str,
+    column_name: str,
+    *,
+    default: bool,
+) -> None:
+    inspector = inspect(engine)
+    columns = {column["name"] for column in inspector.get_columns(table_name)}
+    if column_name in columns:
+        return
+
+    if engine.dialect.name == "postgresql":
+        default_sql = "TRUE" if default else "FALSE"
+    else:
+        default_sql = "1" if default else "0"
+
+    ddl = (
+        f"ALTER TABLE {table_name} "
+        f"ADD COLUMN {column_name} BOOLEAN NOT NULL DEFAULT {default_sql}"
+    )
+
+    with engine.begin() as connection:
+        connection.execute(text(ddl))
+
+
+def _add_missing_string_column(
+    table_name: str,
+    column_name: str,
+    *,
+    length: int,
+) -> None:
+    inspector = inspect(engine)
+    columns = {column["name"] for column in inspector.get_columns(table_name)}
+    if column_name in columns:
+        return
+
+    ddl = (
+        f"ALTER TABLE {table_name} "
+        f"ADD COLUMN {column_name} VARCHAR({length}) NULL"
+    )
+
+    with engine.begin() as connection:
+        connection.execute(text(ddl))
+
+
 def _apply_runtime_schema_upgrades() -> None:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
@@ -56,6 +101,9 @@ def _apply_runtime_schema_upgrades() -> None:
         _add_missing_json_column("recommendation_results", "request_payload")
     if "recommendation_rule_audit" in tables:
         _add_missing_json_column("recommendation_rule_audit", "request_payload")
+    if "datapump_jobs" in tables:
+        _add_missing_boolean_column("datapump_jobs", "visible_in_app", default=True)
+        _add_missing_string_column("datapump_jobs", "retry_of_job_id", length=32)
 
 
 def init_db() -> None:

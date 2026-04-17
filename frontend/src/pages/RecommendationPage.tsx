@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 
 import { navigate } from "../app/router";
 import { AppFrame } from "../components/AppFrame";
+import { MigrationReadinessSummary } from "../components/MigrationReadinessSummary";
+import { RemediationPackPanel } from "../components/RemediationPackPanel";
+import { SchemaDependencyAnalyzer } from "../components/SchemaDependencyAnalyzer";
 import { StatusPanel } from "../components/StatusPanel";
 import { ImplementationPlanFromRecommendation } from "../features/implementation-plan/ImplementationPlanView";
 import { RecommendationView } from "../features/recommendation-results/RecommendationView";
@@ -434,6 +437,10 @@ export function RecommendationPage({ requestId }: RecommendationPageProps) {
                 </>
               ) : null}
 
+              <SchemaDependencyAnalyzer
+                analysis={migration?.source_metadata?.dependency_analysis}
+              />
+
               {recommendation.metadata_enrichment?.errors.length ? (
                 <div className="form-alert form-alert--error">
                   <strong>Metadata collection errors</strong>
@@ -521,9 +528,16 @@ export function RecommendationPage({ requestId }: RecommendationPageProps) {
                   </dl>
                   <p>{migration.migration_validation.summary}</p>
 
+                  <MigrationReadinessSummary assessment={migration.migration_validation} />
+
+                  <RemediationPackPanel
+                    pack={migration.migration_validation.remediation_pack}
+                    requestId={migration.request_id}
+                  />
+
                   {migration.migration_validation.checks.length ? (
                     <div className="table-wrap">
-                      <table className="results-table results-table--compact">
+                      <table className="results-table results-table--compact results-table--validation">
                         <thead>
                           <tr>
                             <th>Check</th>

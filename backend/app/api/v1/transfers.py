@@ -2,6 +2,8 @@ from fastapi import APIRouter, HTTPException, Query, status
 
 from backend.app.schemas.transfer import (
     DataPumpCapabilitiesResponse,
+    DataPumpConnectivityDiagnosticsRequest,
+    DataPumpConnectivityDiagnosticsResponse,
     DataPumpJobCreate,
     DataPumpJobListResponse,
     DataPumpJobPurgeResponse,
@@ -15,6 +17,16 @@ router = APIRouter()
 @router.get("/datapump/capabilities", response_model=DataPumpCapabilitiesResponse)
 async def get_datapump_capabilities() -> DataPumpCapabilitiesResponse:
     return datapump_transfer_service.get_capabilities()
+
+
+@router.post(
+    "/datapump/diagnostics",
+    response_model=DataPumpConnectivityDiagnosticsResponse,
+)
+async def run_datapump_connectivity_diagnostics(
+    request: DataPumpConnectivityDiagnosticsRequest,
+) -> DataPumpConnectivityDiagnosticsResponse:
+    return datapump_transfer_service.run_connectivity_diagnostics(request)
 
 
 @router.post(
@@ -53,3 +65,13 @@ async def get_datapump_job(job_id: str) -> DataPumpJobRecord:
             detail=f"Data Pump job '{job_id}' was not found.",
         )
     return record
+
+
+@router.post("/datapump/jobs/{job_id}/retry", response_model=DataPumpJobRecord)
+async def retry_datapump_job(job_id: str) -> DataPumpJobRecord:
+    try:
+        return datapump_transfer_service.retry_job(job_id)
+    except ValueError as error:
+        detail = str(error)
+        status_code = status.HTTP_404_NOT_FOUND if "was not found" in detail else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=detail) from error

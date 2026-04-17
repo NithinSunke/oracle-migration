@@ -5,6 +5,7 @@ import { StatusPanel } from "../components/StatusPanel";
 import { api, ApiError } from "../services/api";
 import type {
   DataPumpCapabilitiesResponse,
+  DataPumpConnectivityDiagnosticsResponse,
   DataPumpJobCreate,
   DataPumpJobRecord,
   DataPumpOperation,
@@ -161,6 +162,7 @@ export function TransferJobsPage() {
   const [transferDumpFiles, setTransferDumpFiles] = useState(false);
   const [parallel, setParallel] = useState(1);
   const [schemasText, setSchemasText] = useState("");
+  const [tablesText, setTablesText] = useState("");
   const [remapText, setRemapText] = useState("");
   const [excludeStatistics, setExcludeStatistics] = useState(true);
   const [compressionEnabled, setCompressionEnabled] = useState(false);
@@ -173,6 +175,8 @@ export function TransferJobsPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [historyMessage, setHistoryMessage] = useState<string | null>(null);
   const [showFullLog, setShowFullLog] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<DataPumpConnectivityDiagnosticsResponse | null>(null);
+  const [isRunningDiagnostics, setIsRunningDiagnostics] = useState(false);
   const actualRunUnavailable =
     dryRun === false && capabilities?.actual_run_ready === false;
   const objectStorageImportNeedsCli =
@@ -229,12 +233,12 @@ export function TransferJobsPage() {
 
   async function handlePurgeHistory() {
     if (purgeableJobs.length === 0) {
-      setHistoryMessage("There are no completed or planned Data Pump jobs to purge right now.");
+      setHistoryMessage("There are no completed or planned Data Pump jobs to hide right now.");
       return;
     }
 
     const confirmed = window.confirm(
-      "Purge historical Data Pump jobs from the app? Running and queued jobs will be kept.",
+      "Hide older finished Data Pump jobs from the app? The newest 5 finished jobs stay visible, active jobs stay visible, and all records remain in the database.",
     );
     if (!confirmed) {
       return;
@@ -252,15 +256,23 @@ export function TransferJobsPage() {
               response.skipped_active_count === 1 ? " was" : "s were"
             } kept.`
           : "";
+      const recentMessage =
+        response.preserved_recent_count > 0
+          ? ` ${response.preserved_recent_count} recent finished job${
+              response.preserved_recent_count === 1 ? " stays" : "s stay"
+            } visible in the app.`
+          : "";
 
       if (response.purged_count > 0) {
         setHistoryMessage(
-          `Purged ${response.purged_count} historical Data Pump job${
+          `Hidden ${response.purged_count} older Data Pump job${
             response.purged_count === 1 ? "" : "s"
-          }.${keptMessage}`,
+          } from the app.${recentMessage}${keptMessage} Database records were kept.`,
         );
       } else {
-        setHistoryMessage(`No historical jobs were purged.${keptMessage}`);
+        setHistoryMessage(
+          `No additional older jobs were hidden.${recentMessage}${keptMessage}`,
+        );
       }
 
       await loadJobs();
@@ -268,10 +280,64 @@ export function TransferJobsPage() {
       if (error instanceof ApiError) {
         setErrorMessage(error.message);
       } else {
-        setErrorMessage("Unable to purge historical Data Pump jobs.");
+        setErrorMessage("Unable to update visible Data Pump job history.");
       }
     } finally {
       setIsPurgingHistory(false);
+    }
+  }
+
+  async function handleRunDiagnostics() {
+    setIsRunningDiagnostics(true);
+    setErrorMessage(null);
+    try {
+      const response = await api.runDataPumpDiagnostics({
+        source_connection: sourceConnection.host.trim() ? toConnectionPayload(sourceConnection) : null,
+        target_connection: targetConnection.host.trim() ? toConnectionPayload(targetConnection) : null,
+        object_storage:
+          storageType === "OCI_OBJECT_STORAGE" && objectStorageRegion.trim() && objectStorageCredential.trim()
+            ? {
+                credential_name: objectStorageCredential.trim(),
+                region: objectStorageRegion.trim(),
+                namespace: objectStorageNamespace.trim(),
+                bucket: objectStorageBucket.trim(),
+                object_prefix: objectStoragePrefix.trim() || null,
+              }
+            : null,
+      });
+      setDiagnostics(response);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        setErrorMessage(error.message);
+      } else {
+        setErrorMessage("Unable to run connectivity diagnostics.");
+      }
+    } finally {
+      setIsRunningDiagnostics(false);
+    }
+  }
+
+  async function handleRetrySelectedJob() {
+    if (!selectedJob) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    setErrorMessage(null);
+    try {
+      const created = await api.retryDataPumpJob(selectedJob.job_id);
+      setHistoryMessage(
+        `Queued retry job ${created.job_id} from failed job ${selectedJob.job_id}.`,
+      );
+      await loadJobs(created.job_id);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        setErrorMessage(error.message);
+      } else {
+        setErrorMessage("Unable to retry the selected Data Pump job.");
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   }
 
@@ -469,6 +535,10 @@ export function TransferJobsPage() {
         .split(",")
         .map((item) => item.trim())
         .filter(Boolean);
+      const tables = tablesText
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
       const remapSchemas = remapText
         .split(",")
         .map((item) => item.trim())
@@ -510,6 +580,7 @@ export function TransferJobsPage() {
             storageType === "LOCAL_FS" ? transferDumpFiles : false,
           parallel,
           schemas,
+          tables,
           exclude_statistics: excludeStatistics,
           compression_enabled: compressionEnabled,
           table_exists_action: tableExistsAction,
@@ -645,8 +716,13 @@ export function TransferJobsPage() {
                       onChange={(event) => setScope(event.target.value as DataPumpScope)}
                     >
                       <option value="SCHEMA">Schema</option>
+                      <option value="TABLE">Table</option>
                       <option value="FULL">Full</option>
                     </select>
+                    <p className="field-helper field-helper--standalone">
+                      Data Pump jobs in this page support <strong>Schema</strong>,{" "}
+                      <strong>Table</strong>, and <strong>Full</strong> scope.
+                    </p>
                   </label>
                   <label className="field">
                     <span>Storage Type</span>
@@ -703,6 +779,19 @@ export function TransferJobsPage() {
                         onChange={(event) => setSchemasText(event.target.value)}
                         placeholder="HR,FINANCE"
                       />
+                    </label>
+                  ) : null}
+                  {scope === "TABLE" ? (
+                    <label className="field">
+                      <span>Tables (comma-separated owner.table)</span>
+                      <input
+                        value={tablesText}
+                        onChange={(event) => setTablesText(event.target.value)}
+                        placeholder="HR.EMPLOYEES,HR.DEPARTMENTS"
+                      />
+                      <p className="field-helper field-helper--standalone">
+                        Enter each table in <code>owner.table</code> format.
+                      </p>
                     </label>
                   ) : null}
                   {operation === "IMPORT" ? (
@@ -981,10 +1070,66 @@ export function TransferJobsPage() {
                   )
                 : null}
 
-              <div className="form-actions">
-                <button
-                  className="primary-button"
-                  type="submit"
+            <div className="form-actions">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => {
+                  void handleRunDiagnostics();
+                }}
+                disabled={isRunningDiagnostics}
+              >
+                {isRunningDiagnostics ? "Running Diagnostics..." : "Run Connectivity Diagnostics"}
+              </button>
+            </div>
+
+            {diagnostics ? (
+              <section className="panel panel--inner">
+                <div className="section-heading">
+                  <h2>Connectivity Diagnostics</h2>
+                  <p>{diagnostics.summary}</p>
+                </div>
+                <div className="table-wrap">
+                  <table className="results-table results-table--compact">
+                    <thead>
+                      <tr>
+                        <th>Check</th>
+                        <th>Status</th>
+                        <th>Detail</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {diagnostics.checks.map((item) => (
+                        <tr key={item.code}>
+                          <td>{item.label}</td>
+                          <td>
+                            <span
+                              className={
+                                item.status === "PASS"
+                                  ? "soft-badge soft-badge--success"
+                                  : item.status === "FAIL"
+                                    ? "soft-badge soft-badge--danger"
+                                    : item.status === "WARN"
+                                      ? "soft-badge soft-badge--warning"
+                                      : "soft-badge soft-badge--neutral"
+                              }
+                            >
+                              {item.status}
+                            </span>
+                          </td>
+                          <td>{item.detail}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            ) : null}
+
+            <div className="form-actions">
+              <button
+                className="primary-button"
+                type="submit"
                   disabled={isSubmitting}
                 >
                   {isSubmitting
@@ -1011,12 +1156,13 @@ export function TransferJobsPage() {
                   void handlePurgeHistory();
                 }}
               >
-                {isPurgingHistory ? "Purging History..." : "Purge Historical Jobs"}
+                {isPurgingHistory ? "Updating History..." : "Hide Older Jobs"}
               </button>
             </div>
             <p className="field-helper field-helper--standalone">
-              This clears finished app history only. Active <code>QUEUED</code> and{" "}
-              <code>RUNNING</code> jobs are kept.
+              This hides finished jobs older than the latest 5 from the app only. Active{" "}
+              <code>QUEUED</code> and <code>RUNNING</code> jobs stay visible, and all job rows
+              remain stored in the database.
             </p>
             {historyMessage ? (
               <div className="form-alert form-alert--success">
@@ -1095,6 +1241,10 @@ export function TransferJobsPage() {
                     <dd>{selectedJob.request_id ?? "Not linked"}</dd>
                   </div>
                   <div>
+                    <dt>Retry Of</dt>
+                    <dd>{selectedJob.retry_of_job_id ?? "Original job"}</dd>
+                  </div>
+                  <div>
                     <dt>Started</dt>
                     <dd>{formatDate(selectedJob.started_at)}</dd>
                   </div>
@@ -1135,6 +1285,73 @@ export function TransferJobsPage() {
                     </dd>
                   </div>
                 </dl>
+
+                {selectedJob.can_retry ? (
+                  <div className="form-actions">
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      disabled={isSubmitting}
+                      onClick={() => {
+                        void handleRetrySelectedJob();
+                      }}
+                    >
+                      {isSubmitting ? "Queueing Retry..." : "Retry Failed Job"}
+                    </button>
+                  </div>
+                ) : null}
+
+                {selectedJob.failure_analysis ? (
+                  <section className="panel panel--inner">
+                    <div className="section-heading">
+                      <h2>Failure Analysis</h2>
+                      <p>
+                        Review the parsed failure stage, object, and suggested parameter changes before
+                        retrying.
+                      </p>
+                    </div>
+                    <dl className="snapshot-grid snapshot-grid--compact">
+                      <div>
+                        <dt>Stage</dt>
+                        <dd>{selectedJob.failure_analysis.failed_stage ?? "Not detected"}</dd>
+                      </div>
+                      <div>
+                        <dt>Error</dt>
+                        <dd>{selectedJob.failure_analysis.failed_error_code ?? "Not detected"}</dd>
+                      </div>
+                      <div>
+                        <dt>Owner</dt>
+                        <dd>{selectedJob.failure_analysis.failed_owner ?? "Not detected"}</dd>
+                      </div>
+                      <div>
+                        <dt>Object</dt>
+                        <dd>{selectedJob.failure_analysis.failed_object ?? "Not detected"}</dd>
+                      </div>
+                    </dl>
+                    {selectedJob.failure_analysis.summary ? (
+                      <p className="field-helper field-helper--standalone">
+                        {selectedJob.failure_analysis.summary}
+                      </p>
+                    ) : null}
+                    {selectedJob.failure_analysis.retry_notes.length > 0 ? (
+                      <ul className="bullet-list">
+                        {selectedJob.failure_analysis.retry_notes.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {selectedJob.failure_analysis.suggested_parameter_changes.length > 0 ? (
+                      <>
+                        <div className="section-heading report-preview__heading">
+                          <h2>Suggested Parfile Corrections</h2>
+                        </div>
+                        <pre className="runbook-code-block">
+                          <code>{selectedJob.failure_analysis.suggested_parameter_changes.join("\n")}</code>
+                        </pre>
+                      </>
+                    ) : null}
+                  </section>
+                ) : null}
 
                 {selectedJob.command_preview ? (
                   <>

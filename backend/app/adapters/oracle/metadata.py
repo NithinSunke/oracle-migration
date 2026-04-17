@@ -4,6 +4,9 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from backend.app.adapters.oracle.client import OracleDatabaseClient
+from backend.app.services.oracle_dependency_analysis import (
+    oracle_dependency_analysis_service,
+)
 from backend.app.schemas.migration import OracleConnectionConfig
 from backend.app.schemas.oracle import (
     OracleDiscoverySection,
@@ -203,6 +206,9 @@ class OracleMetadataAdapter:
                     errors,
                 )
                 metadata.discovery_summary = self._build_discovery_summary(metadata)
+                metadata.dependency_analysis = oracle_dependency_analysis_service.analyze(
+                    metadata
+                )
 
         for field_name, value in metadata.model_dump(exclude={"collected_at"}).items():
             if value is not None:
@@ -472,6 +478,202 @@ class OracleMetadataAdapter:
             )
             for row in rows or []
         ]
+
+    def lookup_target_directories(
+        self,
+        connection: OracleConnectionConfig,
+        directory_names: list[str],
+    ) -> dict[str, str]:
+        normalized_names = self._normalize_names(directory_names)
+        if not normalized_names:
+            return {}
+
+        with self._client_factory(connection).connect() as oracle_connection:
+            with oracle_connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT directory_name, directory_path
+                    FROM dba_directories
+                    WHERE directory_name IN ({self._sql_name_list(normalized_names)})
+                    ORDER BY directory_name
+                    """
+                )
+                rows = cursor.fetchall()
+
+        return {
+            str(row[0]).strip().upper(): str(row[1])
+            for row in rows or []
+            if row[0] is not None and row[1] is not None
+        }
+
+    def lookup_target_profiles(
+        self,
+        connection: OracleConnectionConfig,
+        profile_names: list[str],
+    ) -> set[str]:
+        normalized_names = self._normalize_names(profile_names)
+        if not normalized_names:
+            return set()
+
+        with self._client_factory(connection).connect() as oracle_connection:
+            with oracle_connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT DISTINCT profile
+                    FROM dba_profiles
+                    WHERE profile IN ({self._sql_name_list(normalized_names)})
+                    ORDER BY profile
+                    """
+                )
+                rows = cursor.fetchall()
+
+        return {
+            str(row[0]).strip().upper()
+            for row in rows or []
+            if row[0] is not None and str(row[0]).strip()
+        }
+
+    def lookup_target_roles(
+        self,
+        connection: OracleConnectionConfig,
+        role_names: list[str],
+    ) -> set[str]:
+        normalized_names = self._normalize_names(role_names)
+        if not normalized_names:
+            return set()
+
+        with self._client_factory(connection).connect() as oracle_connection:
+            with oracle_connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT role
+                    FROM dba_roles
+                    WHERE role IN ({self._sql_name_list(normalized_names)})
+                    ORDER BY role
+                    """
+                )
+                rows = cursor.fetchall()
+
+        return {
+            str(row[0]).strip().upper()
+            for row in rows or []
+            if row[0] is not None and str(row[0]).strip()
+        }
+
+    def lookup_target_directory_privileges(
+        self,
+        connection: OracleConnectionConfig,
+        directory_names: list[str],
+        grantees: list[str],
+    ) -> set[tuple[str, str, str]]:
+        normalized_directories = self._normalize_names(directory_names)
+        normalized_grantees = self._normalize_names(grantees)
+        if not normalized_directories or not normalized_grantees:
+            return set()
+
+        with self._client_factory(connection).connect() as oracle_connection:
+            with oracle_connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT table_name, grantee, privilege
+                    FROM dba_tab_privs
+                    WHERE table_name IN ({self._sql_name_list(normalized_directories)})
+                      AND grantee IN ({self._sql_name_list(normalized_grantees)})
+                      AND owner = 'SYS'
+                    ORDER BY table_name, grantee, privilege
+                    """
+                )
+                rows = cursor.fetchall()
+
+        return {
+            (
+                str(row[0]).strip().upper(),
+                str(row[1]).strip().upper(),
+                str(row[2]).strip().upper(),
+            )
+            for row in rows or []
+            if row[0] is not None and row[1] is not None and row[2] is not None
+        }
+
+    def lookup_target_network_acl_entries(
+        self,
+        connection: OracleConnectionConfig,
+        hosts: list[str],
+        principals: list[str],
+    ) -> set[tuple[str, str, str, str, str]]:
+        normalized_hosts = sorted({host.strip() for host in hosts if host and host.strip()})
+        normalized_principals = self._normalize_names(principals)
+        if not normalized_hosts or not normalized_principals:
+            return set()
+
+        with self._client_factory(connection).connect() as oracle_connection:
+            with oracle_connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT host, TO_CHAR(lower_port), TO_CHAR(upper_port), principal, privilege
+                    FROM dba_host_aces
+                    WHERE host IN ({self._sql_name_list(normalized_hosts)})
+                      AND principal IN ({self._sql_name_list(normalized_principals)})
+                    ORDER BY host, principal, privilege
+                    """
+                )
+                rows = cursor.fetchall()
+
+        return {
+            (
+                str(row[0]).strip(),
+                str(row[1]).strip() if row[1] is not None else "",
+                str(row[2]).strip() if row[2] is not None else "",
+                str(row[3]).strip().upper(),
+                str(row[4]).strip().lower(),
+            )
+            for row in rows or []
+            if row[0] is not None and row[3] is not None and row[4] is not None
+        }
+
+    def lookup_target_credentials(
+        self,
+        connection: OracleConnectionConfig,
+        credential_names: list[str],
+    ) -> set[str]:
+        normalized_names = self._normalize_names(credential_names)
+        if not normalized_names:
+            return set()
+
+        queries = [
+            f"""
+            SELECT credential_name
+            FROM user_credentials
+            WHERE credential_name IN ({self._sql_name_list(normalized_names)})
+            """,
+            f"""
+            SELECT credential_name
+            FROM all_credentials
+            WHERE credential_name IN ({self._sql_name_list(normalized_names)})
+            """,
+            f"""
+            SELECT credential_name
+            FROM dba_credentials
+            WHERE credential_name IN ({self._sql_name_list(normalized_names)})
+            """,
+        ]
+
+        with self._client_factory(connection).connect() as oracle_connection:
+            with oracle_connection.cursor() as cursor:
+                for query in queries:
+                    try:
+                        cursor.execute(query)
+                        rows = cursor.fetchall()
+                    except Exception:
+                        continue
+
+                    return {
+                        str(row[0]).strip().upper()
+                        for row in rows or []
+                        if row[0] is not None and str(row[0]).strip()
+                    }
+
+        return set()
 
     @staticmethod
     def _query_scalar(
@@ -1263,6 +1465,48 @@ class OracleMetadataAdapter:
             ),
             self._query_table_section(
                 cursor,
+                key="network_acls",
+                title="DB:Network ACLs from CDB/PDB",
+                columns=[
+                    "CONTAINER",
+                    "HOST",
+                    "LOWER_PORT",
+                    "UPPER_PORT",
+                    "PRINCIPAL",
+                    "PRIVILEGE",
+                ],
+                query=(
+                    """
+                    SELECT
+                        vc.name,
+                        a.host,
+                        TO_CHAR(a.lower_port),
+                        TO_CHAR(a.upper_port),
+                        a.principal,
+                        a.privilege
+                    FROM cdb_host_aces a
+                    JOIN v$containers vc ON vc.con_id = a.con_id
+                    ORDER BY vc.name, a.host, a.principal, a.privilege
+                    """
+                    if is_cdb
+                    else """
+                    SELECT
+                        name,
+                        host,
+                        TO_CHAR(lower_port),
+                        TO_CHAR(upper_port),
+                        principal,
+                        privilege
+                    FROM dba_host_aces
+                    CROSS JOIN (SELECT name FROM v$database)
+                    ORDER BY host, principal, privilege
+                    """
+                ),
+                errors=errors,
+                required=False,
+            ),
+            self._query_table_section(
+                cursor,
                 key="asm_disk_details",
                 title="DB:Database ASM Disk Details from CDB/PDB",
                 columns=["GROUP_NUMBER", "DISKGROUP_NAME", "STATE", "TYPE", "TOTAL_MB", "FREE_MB"],
@@ -1402,6 +1646,207 @@ class OracleMetadataAdapter:
             self._query_database_size_section(cursor, is_cdb, errors),
             self._query_standby_section(cursor, errors),
             self._query_database_users_section(metadata),
+            self._query_table_section(
+                cursor,
+                key="schema_role_grants",
+                title="DB:Schema Role Grants from CDB/PDB",
+                columns=["CONTAINER", "GRANTEE", "GRANTED_ROLE", "DEFAULT_ROLE", "ADMIN_OPTION"],
+                query=(
+                    """
+                    SELECT vc.name, p.grantee, p.granted_role, p.default_role, p.admin_option
+                    FROM cdb_role_privs p
+                    JOIN cdb_users u
+                      ON u.con_id = p.con_id
+                     AND u.username = p.grantee
+                    JOIN v$containers vc
+                      ON vc.con_id = p.con_id
+                    WHERE vc.name <> 'PDB$SEED'
+                      AND u.oracle_maintained = 'N'
+                      AND u.username <> 'PUBLIC'
+                    ORDER BY vc.name, p.grantee, p.granted_role
+                    """
+                    if is_cdb
+                    else """
+                    SELECT name, p.grantee, p.granted_role, p.default_role, p.admin_option
+                    FROM dba_role_privs p
+                    JOIN dba_users u
+                      ON u.username = p.grantee
+                    CROSS JOIN (SELECT name FROM v$database)
+                    WHERE u.oracle_maintained = 'N'
+                      AND u.username <> 'PUBLIC'
+                    ORDER BY p.grantee, p.granted_role
+                    """
+                ),
+                errors=errors,
+                required=False,
+            ),
+            self._query_table_section(
+                cursor,
+                key="role_sys_privs",
+                title="DB:Role System Privileges from CDB/PDB",
+                columns=["CONTAINER", "ROLE", "PRIVILEGE", "ADMIN_OPTION"],
+                query=(
+                    """
+                    SELECT vc.name, p.grantee, p.privilege, p.admin_option
+                    FROM cdb_sys_privs p
+                    JOIN v$containers vc
+                      ON vc.con_id = p.con_id
+                    WHERE vc.name <> 'PDB$SEED'
+                      AND p.grantee IN (
+                        SELECT DISTINCT rp.granted_role
+                        FROM cdb_role_privs rp
+                        JOIN cdb_users u
+                          ON u.con_id = rp.con_id
+                         AND u.username = rp.grantee
+                        WHERE u.oracle_maintained = 'N'
+                          AND u.username <> 'PUBLIC'
+                      )
+                    ORDER BY vc.name, p.grantee, p.privilege
+                    """
+                    if is_cdb
+                    else """
+                    SELECT name, p.grantee, p.privilege, p.admin_option
+                    FROM dba_sys_privs p
+                    CROSS JOIN (SELECT name FROM v$database)
+                    WHERE p.grantee IN (
+                        SELECT DISTINCT rp.granted_role
+                        FROM dba_role_privs rp
+                        JOIN dba_users u
+                          ON u.username = rp.grantee
+                        WHERE u.oracle_maintained = 'N'
+                          AND u.username <> 'PUBLIC'
+                    )
+                    ORDER BY p.grantee, p.privilege
+                    """
+                ),
+                errors=errors,
+                required=False,
+            ),
+            self._query_table_section(
+                cursor,
+                key="role_object_privs",
+                title="DB:Role Object Privileges from CDB/PDB",
+                columns=["CONTAINER", "ROLE", "OWNER", "TABLE_NAME", "PRIVILEGE", "GRANTABLE"],
+                query=(
+                    """
+                    SELECT vc.name, p.grantee, p.owner, p.table_name, p.privilege, p.grantable
+                    FROM cdb_tab_privs p
+                    JOIN v$containers vc
+                      ON vc.con_id = p.con_id
+                    WHERE vc.name <> 'PDB$SEED'
+                      AND p.grantee IN (
+                        SELECT DISTINCT rp.granted_role
+                        FROM cdb_role_privs rp
+                        JOIN cdb_users u
+                          ON u.con_id = rp.con_id
+                         AND u.username = rp.grantee
+                        WHERE u.oracle_maintained = 'N'
+                          AND u.username <> 'PUBLIC'
+                      )
+                    ORDER BY vc.name, p.grantee, p.owner, p.table_name, p.privilege
+                    """
+                    if is_cdb
+                    else """
+                    SELECT name, p.grantee, p.owner, p.table_name, p.privilege, p.grantable
+                    FROM dba_tab_privs p
+                    CROSS JOIN (SELECT name FROM v$database)
+                    WHERE p.grantee IN (
+                        SELECT DISTINCT rp.granted_role
+                        FROM dba_role_privs rp
+                        JOIN dba_users u
+                          ON u.username = rp.grantee
+                        WHERE u.oracle_maintained = 'N'
+                          AND u.username <> 'PUBLIC'
+                    )
+                    ORDER BY p.grantee, p.owner, p.table_name, p.privilege
+                    """
+                ),
+                errors=errors,
+                required=False,
+            ),
+            self._query_table_section(
+                cursor,
+                key="role_granted_roles",
+                title="DB:Role To Role Grants from CDB/PDB",
+                columns=["CONTAINER", "ROLE", "GRANTED_ROLE", "ADMIN_OPTION"],
+                query=(
+                    """
+                    SELECT vc.name, p.grantee, p.granted_role, p.admin_option
+                    FROM cdb_role_privs p
+                    JOIN v$containers vc
+                      ON vc.con_id = p.con_id
+                    WHERE vc.name <> 'PDB$SEED'
+                      AND p.grantee IN (
+                        SELECT DISTINCT rp.granted_role
+                        FROM cdb_role_privs rp
+                        JOIN cdb_users u
+                          ON u.con_id = rp.con_id
+                         AND u.username = rp.grantee
+                        WHERE u.oracle_maintained = 'N'
+                          AND u.username <> 'PUBLIC'
+                      )
+                    ORDER BY vc.name, p.grantee, p.granted_role
+                    """
+                    if is_cdb
+                    else """
+                    SELECT name, p.grantee, p.granted_role, p.admin_option
+                    FROM dba_role_privs p
+                    CROSS JOIN (SELECT name FROM v$database)
+                    WHERE p.grantee IN (
+                        SELECT DISTINCT rp.granted_role
+                        FROM dba_role_privs rp
+                        JOIN dba_users u
+                          ON u.username = rp.grantee
+                        WHERE u.oracle_maintained = 'N'
+                          AND u.username <> 'PUBLIC'
+                    )
+                    ORDER BY p.grantee, p.granted_role
+                    """
+                ),
+                errors=errors,
+                required=False,
+            ),
+            self._query_table_section(
+                cursor,
+                key="profile_definitions",
+                title="DB:Profile Definitions from CDB/PDB",
+                columns=["CONTAINER", "PROFILE", "RESOURCE_NAME", "LIMIT"],
+                query=(
+                    """
+                    SELECT vc.name, p.profile, p.resource_name, p.limit
+                    FROM cdb_profiles p
+                    JOIN v$containers vc
+                      ON vc.con_id = p.con_id
+                    WHERE vc.name <> 'PDB$SEED'
+                      AND p.profile IN (
+                        SELECT DISTINCT u.profile
+                        FROM cdb_users u
+                        WHERE u.oracle_maintained = 'N'
+                          AND u.username <> 'PUBLIC'
+                          AND u.profile IS NOT NULL
+                          AND u.profile <> 'DEFAULT'
+                      )
+                    ORDER BY vc.name, p.profile, p.resource_name
+                    """
+                    if is_cdb
+                    else """
+                    SELECT name, p.profile, p.resource_name, p.limit
+                    FROM dba_profiles p
+                    CROSS JOIN (SELECT name FROM v$database)
+                    WHERE p.profile IN (
+                        SELECT DISTINCT u.profile
+                        FROM dba_users u
+                        WHERE u.oracle_maintained = 'N'
+                          AND u.username <> 'PUBLIC'
+                          AND u.profile IS NOT NULL
+                          AND u.profile <> 'DEFAULT'
+                    )
+                    ORDER BY p.profile, p.resource_name
+                    """
+                ),
+                errors=errors,
+                required=False,
+            ),
             self._query_table_section(
                 cursor,
                 key="xml_table_columns",
@@ -1563,6 +2008,40 @@ class OracleMetadataAdapter:
                     """
                 ),
                 errors=errors,
+            ),
+            self._query_table_section(
+                cursor,
+                key="java_objects",
+                title="DB:Java Objects from CDB/PDB",
+                columns=["CONTAINER", "OWNER", "OBJECT_NAME", "OBJECT_TYPE", "STATUS"],
+                query=(
+                    """
+                    SELECT vc.name, o.owner, o.object_name, o.object_type, o.status
+                    FROM cdb_objects o
+                    JOIN v$containers vc ON vc.con_id = o.con_id
+                    WHERE o.object_type LIKE 'JAVA%%'
+                      AND """
+                    + self._non_default_cdb_owner_filter(
+                        owner_column="o.owner",
+                        con_id_column="o.con_id",
+                    )
+                    + """
+                    ORDER BY vc.name, o.owner, o.object_name
+                    """
+                    if is_cdb
+                    else """
+                    SELECT name, owner, object_name, object_type, status
+                    FROM dba_objects
+                    CROSS JOIN (SELECT name FROM v$database)
+                    WHERE object_type LIKE 'JAVA%%'
+                      AND """
+                    + self._non_default_dba_owner_filter(owner_column="owner")
+                    + """
+                    ORDER BY owner, object_name
+                    """
+                ),
+                errors=errors,
+                required=False,
             ),
             self._query_table_section(
                 cursor,

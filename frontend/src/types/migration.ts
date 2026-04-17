@@ -97,6 +97,7 @@ export interface OracleSourceMetadata {
   invalid_objects_by_schema: OracleInvalidObjectOwnerSummary[];
   discovery_summary: OracleDiscoverySummaryItem[];
   discovery_sections: OracleDiscoverySection[];
+  dependency_analysis: OracleSchemaDependencyAnalysis | null;
   collected_at: string;
 }
 
@@ -165,7 +166,7 @@ export interface OraclePdbInventoryEntry {
 
 export interface OracleUserInventoryEntry {
   container_name: string;
-  container_type: "CDB_ROOT" | "PDB";
+  container_type: "CDB_ROOT" | "PDB" | "NON_CDB";
   con_id: number;
   username: string;
   user_type: string;
@@ -181,7 +182,7 @@ export interface OracleUserInventoryEntry {
 
 export interface OracleTablespaceInventoryEntry {
   container_name: string;
-  container_type: "CDB_ROOT" | "PDB";
+  container_type: "CDB_ROOT" | "PDB" | "NON_CDB";
   con_id: number;
   tablespace_name: string;
   contents: string | null;
@@ -200,7 +201,7 @@ export interface OracleTablespaceInventoryEntry {
 
 export interface OracleInvalidObjectOwnerSummary {
   container_name: string;
-  container_type: "CDB_ROOT" | "PDB";
+  container_type: "CDB_ROOT" | "PDB" | "NON_CDB";
   con_id: number;
   owner: string;
   invalid_object_count: number;
@@ -221,6 +222,27 @@ export interface OracleDiscoverySection {
   truncated: boolean;
 }
 
+export interface OracleSchemaDependencyIssue {
+  code: string;
+  label: string;
+  status: "CLEAR" | "REVIEW" | "HIGH_RISK";
+  object_count: number;
+  observation: string;
+  recommended_action: string | null;
+  object_names: string[];
+  examples: string[];
+  section_keys: string[];
+}
+
+export interface OracleSchemaDependencyAnalysis {
+  status: "CLEAR" | "REVIEW" | "HIGH_RISK";
+  summary: string;
+  high_risk_count: number;
+  review_count: number;
+  clear_count: number;
+  issues: OracleSchemaDependencyIssue[];
+}
+
 export interface MigrationCompatibilityCheck {
   code: string;
   label: string;
@@ -229,6 +251,56 @@ export interface MigrationCompatibilityCheck {
   source_value: string | null;
   target_value: string | null;
   remediation_sql: string | null;
+}
+
+export interface MigrationRemediationScript {
+  code: string;
+  label: string;
+  category:
+    | "USER"
+    | "TABLESPACE"
+    | "DIRECTORY"
+    | "DIRECTORY_GRANT"
+    | "PROFILE"
+    | "ROLE"
+    | "ACL"
+    | "OBJECT_STORAGE_CREDENTIAL";
+  status: "READY" | "OPTIONAL";
+  summary: string;
+  sql: string;
+}
+
+export interface MigrationRemediationPack {
+  pack_version: number;
+  summary: string;
+  scripts: MigrationRemediationScript[];
+  combined_sql: string;
+}
+
+export interface MigrationReadinessFactor {
+  code: string;
+  label: string;
+  weight: number;
+  status: "PASS" | "WARN" | "FAIL" | "INFO";
+  score: number;
+  observation: string;
+  source_value: string | null;
+  target_value: string | null;
+}
+
+export interface MigrationReadinessCategory {
+  key: string;
+  label: string;
+  weight: number;
+  score: number;
+  factors: MigrationReadinessFactor[];
+}
+
+export interface MigrationReadinessSummary {
+  overall_score: number;
+  verdict: "READY" | "REVIEW" | "BLOCKED";
+  summary: string;
+  categories: MigrationReadinessCategory[];
 }
 
 export interface MigrationCompatibilityAssessment {
@@ -243,8 +315,10 @@ export interface MigrationCompatibilityAssessment {
   source: OracleSourceMetadata | null;
   target: OracleTargetMetadata | null;
   checks: MigrationCompatibilityCheck[];
+  remediation_pack: MigrationRemediationPack | null;
   blockers: string[];
   warnings: string[];
+  readiness: MigrationReadinessSummary | null;
   notes: string[];
   validated_at: string;
 }

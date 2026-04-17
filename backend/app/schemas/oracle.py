@@ -32,7 +32,7 @@ class OraclePdbInventoryEntry(BaseModel):
 
 class OracleUserInventoryEntry(BaseModel):
     container_name: str
-    container_type: Literal["CDB_ROOT", "PDB"] = "PDB"
+    container_type: Literal["CDB_ROOT", "PDB", "NON_CDB"] = "PDB"
     con_id: int = Field(ge=0)
     username: str
     user_type: str
@@ -88,6 +88,28 @@ class OracleDiscoverySection(BaseModel):
     truncated: bool = False
 
 
+class OracleSchemaDependencyIssue(BaseModel):
+    code: str
+    label: str
+    status: Literal["CLEAR", "REVIEW", "HIGH_RISK"]
+    object_count: int = Field(default=0, ge=0)
+    observation: str
+    recommended_action: str | None = None
+    object_names: list[str] = Field(default_factory=list)
+    examples: list[str] = Field(default_factory=list)
+    section_keys: list[str] = Field(default_factory=list)
+
+
+class OracleSchemaDependencyAnalysis(BaseModel):
+    analysis_version: int = Field(default=1, ge=1)
+    status: Literal["CLEAR", "REVIEW", "HIGH_RISK"]
+    summary: str
+    high_risk_count: int = Field(default=0, ge=0)
+    review_count: int = Field(default=0, ge=0)
+    clear_count: int = Field(default=0, ge=0)
+    issues: list[OracleSchemaDependencyIssue] = Field(default_factory=list)
+
+
 class OracleSchemaInventoryEntry(BaseModel):
     container_name: str = "UNKNOWN"
     container_type: Literal["CDB_ROOT", "PDB", "NON_CDB"] = "NON_CDB"
@@ -128,6 +150,7 @@ class OracleSourceMetadata(BaseModel):
     invalid_objects_by_schema: list[OracleInvalidObjectOwnerSummary] = Field(default_factory=list)
     discovery_summary: list[OracleDiscoverySummaryItem] = Field(default_factory=list)
     discovery_sections: list[OracleDiscoverySection] = Field(default_factory=list)
+    dependency_analysis: OracleSchemaDependencyAnalysis | None = None
     collected_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
     )
@@ -175,6 +198,57 @@ class MigrationCompatibilityCheck(BaseModel):
     remediation_sql: str | None = None
 
 
+class MigrationRemediationScript(BaseModel):
+    code: str
+    label: str
+    category: Literal[
+        "USER",
+        "TABLESPACE",
+        "DIRECTORY",
+        "DIRECTORY_GRANT",
+        "PROFILE",
+        "ROLE",
+        "ACL",
+        "OBJECT_STORAGE_CREDENTIAL",
+    ]
+    status: Literal["READY", "OPTIONAL"]
+    summary: str
+    sql: str
+
+
+class MigrationRemediationPack(BaseModel):
+    pack_version: int = Field(default=1, ge=1)
+    summary: str
+    scripts: list[MigrationRemediationScript] = Field(default_factory=list)
+    combined_sql: str = ""
+
+
+class MigrationReadinessFactor(BaseModel):
+    code: str
+    label: str
+    weight: int = Field(ge=0, le=100)
+    status: Literal["PASS", "WARN", "FAIL", "INFO"]
+    score: int = Field(ge=0, le=100)
+    observation: str
+    source_value: str | None = None
+    target_value: str | None = None
+
+
+class MigrationReadinessCategory(BaseModel):
+    key: str
+    label: str
+    weight: int = Field(ge=0, le=100)
+    score: int = Field(ge=0, le=100)
+    factors: list[MigrationReadinessFactor] = Field(default_factory=list)
+
+
+class MigrationReadinessSummary(BaseModel):
+    overall_score: int = Field(ge=0, le=100)
+    verdict: Literal["READY", "REVIEW", "BLOCKED"]
+    summary: str
+    categories: list[MigrationReadinessCategory] = Field(default_factory=list)
+
+
 class MigrationCompatibilityAssessment(BaseModel):
     status: Literal[
         "MIGRATABLE",
@@ -192,8 +266,10 @@ class MigrationCompatibilityAssessment(BaseModel):
     source: OracleSourceMetadata | None = None
     target: OracleTargetMetadata | None = None
     checks: list[MigrationCompatibilityCheck] = Field(default_factory=list)
+    remediation_pack: MigrationRemediationPack | None = None
     blockers: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    readiness: MigrationReadinessSummary | None = None
     notes: list[str] = Field(default_factory=list)
     validated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),

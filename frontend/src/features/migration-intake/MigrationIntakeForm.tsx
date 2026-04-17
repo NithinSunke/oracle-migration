@@ -1,6 +1,7 @@
 import type { FormEvent, ReactNode } from "react";
 import { useState } from "react";
 
+import { MigrationReadinessSummary } from "../../components/MigrationReadinessSummary";
 import { api, ApiError } from "../../services/api";
 import type {
   MetadataEnrichmentSummary,
@@ -73,6 +74,74 @@ function feasibilityBadgeClass(
   return "soft-badge";
 }
 
+function validationCheckTone(status: string | null | undefined): "success" | "warning" | "danger" | "neutral" {
+  const normalized = status?.trim().toUpperCase() ?? "";
+  if (normalized === "PASS" || normalized === "CONNECTED" || normalized === "READY") {
+    return "success";
+  }
+  if (normalized === "FAIL" || normalized === "FAILED" || normalized === "NOT_MIGRATABLE") {
+    return "danger";
+  }
+  if (normalized === "WARN" || normalized === "WARNING" || normalized === "CONDITIONALLY_MIGRATABLE") {
+    return "warning";
+  }
+  return "neutral";
+}
+
+function validationCheckBadgeClass(status: string | null | undefined): string {
+  const tone = validationCheckTone(status);
+  if (tone === "success") {
+    return "soft-badge soft-badge--success";
+  }
+  if (tone === "danger") {
+    return "soft-badge soft-badge--danger";
+  }
+  if (tone === "warning") {
+    return "soft-badge soft-badge--warning";
+  }
+  return "soft-badge soft-badge--neutral";
+}
+
+function validationSnapshotClass(status: string | null | undefined): string {
+  const tone = validationCheckTone(status);
+  if (tone === "success") {
+    return "validation-snapshot validation-snapshot--success";
+  }
+  if (tone === "danger") {
+    return "validation-snapshot validation-snapshot--danger";
+  }
+  if (tone === "warning") {
+    return "validation-snapshot validation-snapshot--warning";
+  }
+  return "validation-snapshot";
+}
+
+function validationRowClass(status: string | null | undefined): string {
+  const tone = validationCheckTone(status);
+  if (tone === "success") {
+    return "results-table__row--success";
+  }
+  if (tone === "danger") {
+    return "results-table__row--danger";
+  }
+  if (tone === "warning") {
+    return "results-table__row--warning";
+  }
+  return "";
+}
+
+function findValidationCheckStatus(
+  assessment: MigrationCompatibilityAssessment,
+  ...keywords: string[]
+): string | null {
+  const normalizedKeywords = keywords.map((item) => item.toLowerCase());
+  const match = assessment.checks.find((check) => {
+    const haystack = `${check.code} ${check.label}`.toLowerCase();
+    return normalizedKeywords.every((keyword) => haystack.includes(keyword));
+  });
+  return match?.status ?? null;
+}
+
 function formatOptionalValue(value: string | number | null | undefined): string {
   if (value === null || value === undefined || value === "") {
     return "Not provided";
@@ -124,6 +193,38 @@ export function MigrationIntakeForm({
   const resolvedSourceMetadata =
     migrationValidationResult?.source ?? metadataTestResult?.source ?? null;
   const resolvedTargetMetadata = migrationValidationResult?.target ?? null;
+  const sourceConnectionCheckStatus = migrationValidationResult
+    ? findValidationCheckStatus(migrationValidationResult, "source", "connection") ??
+      migrationValidationResult.source_connection_status
+    : null;
+  const targetConnectionCheckStatus = migrationValidationResult
+    ? findValidationCheckStatus(migrationValidationResult, "target", "connection") ??
+      migrationValidationResult.target_connection_status
+    : null;
+  const sourceVersionCheckStatus = migrationValidationResult
+    ? findValidationCheckStatus(migrationValidationResult, "source", "version")
+    : null;
+  const targetVersionCheckStatus = migrationValidationResult
+    ? findValidationCheckStatus(migrationValidationResult, "target", "version")
+    : null;
+  const sourceDeploymentCheckStatus = migrationValidationResult
+    ? findValidationCheckStatus(migrationValidationResult, "source", "deployment")
+    : null;
+  const targetDeploymentCheckStatus = migrationValidationResult
+    ? findValidationCheckStatus(migrationValidationResult, "target", "deployment")
+    : null;
+  const sourceCharsetCheckStatus = migrationValidationResult
+    ? findValidationCheckStatus(migrationValidationResult, "source", "character")
+    : null;
+  const targetCharsetCheckStatus = migrationValidationResult
+    ? findValidationCheckStatus(migrationValidationResult, "target", "character")
+    : null;
+  const targetGlobalNameCheckStatus = migrationValidationResult
+    ? findValidationCheckStatus(migrationValidationResult, "global", "name")
+    : null;
+  const targetRoleCheckStatus = migrationValidationResult
+    ? findValidationCheckStatus(migrationValidationResult, "target", "role")
+    : null;
 
   const hasVerifiedMigration =
     !form.metadata_collection.enabled ||
@@ -1011,7 +1112,7 @@ export function MigrationIntakeForm({
               onClick={() => void handleTestConnection()}
               disabled={!form.metadata_collection.enabled || isTestingConnection}
             >
-              {isTestingConnection ? "Testing Source..." : "Test Source Connection"}
+              {isTestingConnection ? "Validating Source..." : "Validate Source"}
             </button>
             <button
               className="primary-button"
@@ -1174,43 +1275,51 @@ export function MigrationIntakeForm({
               <p>{migrationValidationResult.summary}</p>
 
               <dl className="snapshot-grid snapshot-grid--compact">
-                <div>
+                <div className={validationSnapshotClass(sourceConnectionCheckStatus)}>
                   <dt>Source Connection</dt>
-                  <dd>{migrationValidationResult.source_connection_status}</dd>
+                  <dd>
+                    <span className={validationCheckBadgeClass(sourceConnectionCheckStatus)}>
+                      {migrationValidationResult.source_connection_status}
+                    </span>
+                  </dd>
                 </div>
-                <div>
+                <div className={validationSnapshotClass(targetConnectionCheckStatus)}>
                   <dt>Target Connection</dt>
-                  <dd>{migrationValidationResult.target_connection_status}</dd>
+                  <dd>
+                    <span className={validationCheckBadgeClass(targetConnectionCheckStatus)}>
+                      {migrationValidationResult.target_connection_status}
+                    </span>
+                  </dd>
                 </div>
-                <div>
+                <div className={validationSnapshotClass(sourceVersionCheckStatus)}>
                   <dt>Source Version</dt>
                   <dd>{migrationValidationResult.source?.oracle_version ?? "Not available"}</dd>
                 </div>
-                <div>
+                <div className={validationSnapshotClass(targetVersionCheckStatus)}>
                   <dt>Target Version</dt>
                   <dd>{migrationValidationResult.target?.oracle_version ?? "Not available"}</dd>
                 </div>
-                <div>
+                <div className={validationSnapshotClass(sourceDeploymentCheckStatus)}>
                   <dt>Source Deployment</dt>
                   <dd>{migrationValidationResult.source?.deployment_type ?? "Not available"}</dd>
                 </div>
-                <div>
+                <div className={validationSnapshotClass(targetDeploymentCheckStatus)}>
                   <dt>Target Deployment</dt>
                   <dd>{migrationValidationResult.target?.deployment_type ?? "Not available"}</dd>
                 </div>
-                <div>
+                <div className={validationSnapshotClass(sourceCharsetCheckStatus)}>
                   <dt>Source Character Set</dt>
                   <dd>{migrationValidationResult.source?.character_set ?? "Not available"}</dd>
                 </div>
-                <div>
+                <div className={validationSnapshotClass(targetCharsetCheckStatus)}>
                   <dt>Target Character Set</dt>
                   <dd>{migrationValidationResult.target?.character_set ?? "Not available"}</dd>
                 </div>
-                <div>
+                <div className={validationSnapshotClass(targetGlobalNameCheckStatus)}>
                   <dt>Target Global Name</dt>
                   <dd>{migrationValidationResult.target?.global_name ?? "Not available"}</dd>
                 </div>
-                <div>
+                <div className={validationSnapshotClass(targetRoleCheckStatus)}>
                   <dt>Target Role</dt>
                   <dd>{migrationValidationResult.target?.database_role ?? "Not available"}</dd>
                 </div>
@@ -1218,7 +1327,7 @@ export function MigrationIntakeForm({
 
               {migrationValidationResult.checks.length > 0 ? (
                 <div className="table-wrap">
-                  <table className="results-table results-table--compact">
+                  <table className="results-table results-table--compact results-table--validation">
                     <thead>
                       <tr>
                         <th>Check</th>
@@ -1230,9 +1339,13 @@ export function MigrationIntakeForm({
                     </thead>
                     <tbody>
                       {migrationValidationResult.checks.map((check) => (
-                        <tr key={check.code}>
+                        <tr key={check.code} className={validationRowClass(check.status)}>
                           <td>{check.label}</td>
-                          <td>{check.status}</td>
+                          <td>
+                            <span className={validationCheckBadgeClass(check.status)}>
+                              {check.status}
+                            </span>
+                          </td>
                           <td>{check.source_value ?? ""}</td>
                           <td>{check.target_value ?? ""}</td>
                           <td>{check.message}</td>
@@ -1258,6 +1371,8 @@ export function MigrationIntakeForm({
                   ))}
                 </ul>
               ) : null}
+
+              <MigrationReadinessSummary assessment={migrationValidationResult} />
             </div>
           ) : null}
 

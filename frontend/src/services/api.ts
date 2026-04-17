@@ -2,6 +2,8 @@ import type {
   HistoryListResponse,
   DataPumpJobCreate,
   DataPumpCapabilitiesResponse,
+  DataPumpConnectivityDiagnosticsRequest,
+  DataPumpConnectivityDiagnosticsResponse,
   DataPumpJobListResponse,
   DataPumpJobPurgeResponse,
   DataPumpJobRecord,
@@ -212,6 +214,14 @@ export const api = {
   getDataPumpCapabilities(): Promise<DataPumpCapabilitiesResponse> {
     return request<DataPumpCapabilitiesResponse>("/transfers/datapump/capabilities");
   },
+  runDataPumpDiagnostics(
+    payload: DataPumpConnectivityDiagnosticsRequest,
+  ): Promise<DataPumpConnectivityDiagnosticsResponse> {
+    return request<DataPumpConnectivityDiagnosticsResponse>("/transfers/datapump/diagnostics", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
   listDataPumpJobs(limit = 25): Promise<DataPumpJobListResponse> {
     return request<DataPumpJobListResponse>(`/transfers/datapump/jobs?limit=${limit}`);
   },
@@ -222,5 +232,10 @@ export const api = {
   },
   getDataPumpJob(jobId: string): Promise<DataPumpJobRecord> {
     return request<DataPumpJobRecord>(`/transfers/datapump/jobs/${jobId}`);
+  },
+  retryDataPumpJob(jobId: string): Promise<DataPumpJobRecord> {
+    return request<DataPumpJobRecord>(`/transfers/datapump/jobs/${jobId}/retry`, {
+      method: "POST",
+    });
   },
 };

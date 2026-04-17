@@ -10,11 +10,39 @@ from backend.app.schemas.migration import OracleConnectionConfig
 
 
 DataPumpOperation = Literal["EXPORT", "IMPORT"]
-DataPumpScope = Literal["FULL", "SCHEMA"]
+DataPumpScope = Literal["FULL", "SCHEMA", "TABLE"]
 DataPumpJobStatus = Literal["QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "PLANNED"]
 DataPumpExecutionBackend = Literal["auto", "cli", "db_api"]
 DataPumpResolvedBackend = Literal["cli", "db_api"]
 DataPumpStorageType = Literal["LOCAL_FS", "OCI_OBJECT_STORAGE"]
+
+
+class DataPumpFailureAnalysis(BaseModel):
+    failed_stage: str | None = None
+    failed_object: str | None = None
+    failed_owner: str | None = None
+    failed_error_code: str | None = None
+    summary: str | None = None
+    retry_notes: list[str] = Field(default_factory=list)
+    suggested_parameter_changes: list[str] = Field(default_factory=list)
+
+
+class DataPumpConnectivityDiagnosticCheck(BaseModel):
+    code: str
+    label: str
+    status: Literal["PASS", "WARN", "FAIL", "INFO"]
+    detail: str
+
+
+class DataPumpConnectivityDiagnosticsRequest(BaseModel):
+    source_connection: OracleConnectionConfig | None = None
+    target_connection: OracleConnectionConfig | None = None
+    object_storage: DataPumpJobOptions.ObjectStorageConfig | None = None
+
+
+class DataPumpConnectivityDiagnosticsResponse(BaseModel):
+    summary: str
+    checks: list[DataPumpConnectivityDiagnosticCheck] = Field(default_factory=list)
 
 
 class SchemaRemap(BaseModel):
@@ -38,6 +66,7 @@ class DataPumpJobOptions(BaseModel):
     transfer_dump_files: bool = False
     parallel: int = Field(default=1, ge=1, le=32)
     schemas: list[str] = Field(default_factory=list)
+    tables: list[str] = Field(default_factory=list)
     exclude_statistics: bool = False
     compression_enabled: bool = False
     table_exists_action: Literal["SKIP", "APPEND", "TRUNCATE", "REPLACE"] = "SKIP"
@@ -66,6 +95,19 @@ class DataPumpJobCreate(BaseModel):
     def validate_payload(self) -> "DataPumpJobCreate":
         if self.scope == "SCHEMA" and not self.options.schemas:
             raise ValueError("Provide at least one schema when the Data Pump scope is SCHEMA.")
+
+        if self.scope == "TABLE" and not self.options.tables:
+            raise ValueError(
+                "Provide at least one table in owner.table format when the Data Pump scope is TABLE."
+            )
+        if self.scope == "TABLE":
+            invalid_tables = [
+                table for table in self.options.tables if "." not in table or table.strip().startswith(".")
+            ]
+            if invalid_tables:
+                raise ValueError(
+                    "Table scope requires table names in owner.table format."
+                )
 
         if self.operation == "IMPORT" and self.target_connection is None:
             raise ValueError("Target Oracle connection is required for Data Pump imports.")
@@ -125,16 +167,19 @@ class DataPumpJobCreate(BaseModel):
 class DataPumpJobRecord(BaseModel):
     job_id: str
     request_id: str | None = None
+    retry_of_job_id: str | None = None
     task_id: str | None = None
     job_name: str | None = None
     operation: DataPumpOperation
     scope: DataPumpScope
     status: DataPumpJobStatus
+    can_retry: bool = False
     dry_run: bool
     source_connection: dict | None = None
     target_connection: dict | None = None
     options: DataPumpJobOptions
     command_preview: DataPumpCommandPreview | None = None
+    failure_analysis: DataPumpFailureAnalysis | None = None
     output_excerpt: list[str] = Field(default_factory=list)
     output_log: list[str] = Field(default_factory=list)
     oracle_log_lines: list[str] = Field(default_factory=list)
@@ -153,6 +198,7 @@ class DataPumpJobListResponse(BaseModel):
 class DataPumpJobPurgeResponse(BaseModel):
     purged_job_ids: list[str] = Field(default_factory=list)
     purged_count: int = 0
+    preserved_recent_count: int = 0
     skipped_active_job_ids: list[str] = Field(default_factory=list)
     skipped_active_count: int = 0
 

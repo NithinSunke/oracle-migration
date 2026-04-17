@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 
 from bs4 import BeautifulSoup, Tag
 
+from backend.app.services.oracle_dependency_analysis import (
+    oracle_dependency_analysis_service,
+)
 from backend.app.schemas.oracle import (
     MetadataEnrichmentSummary,
     OracleDiscoverySection,
@@ -73,6 +76,9 @@ class OracleHtmlImportService:
             metadata.discovery_sections,
             metadata.schema_inventory,
             metadata.invalid_objects_by_schema,
+        )
+        metadata.dependency_analysis = oracle_dependency_analysis_service.analyze(
+            metadata
         )
 
         if filename:
@@ -242,12 +248,36 @@ class OracleHtmlImportService:
             return "discovery_summary"
         if "database users" in normalized_title or "cdb users" in normalized_title:
             return "database_users"
+        if "db link" in normalized_title:
+            return "db_links"
+        if "network acl" in normalized_title or "host ace" in normalized_title:
+            return "network_acls"
+        if "directories" in normalized_title:
+            return "directories"
+        if "external tables" in normalized_title:
+            return "external_tables"
+        if "java objects" in normalized_title:
+            return "java_objects"
         if "schema wise object count" in normalized_title:
             return "schema_inventory"
         if "invalid objects" in normalized_title:
             return "invalid_objects"
+        if "scheduler_jobs" in normalized_title or "scheduler jobs" in normalized_title:
+            return "scheduled_jobs_scheduler"
+        if "jobs_from_cdb_jobs" in normalized_title or "scheduled jobs_from_cdb_jobs" in normalized_title:
+            return "scheduled_jobs_cdb_jobs"
         if "tablespace details" in normalized_title or "cdb tablespaces" in normalized_title:
             return "tablespace_details"
+        if "xml_table_columns" in normalized_title:
+            return "xml_table_columns"
+        if "xml_table_info" in normalized_title:
+            return "xml_table_info"
+        if "xml_types" in normalized_title:
+            return "xml_types"
+        if "unsupported datatypes" in normalized_title or "all unsupported" in normalized_title:
+            return "unsupported_datatypes"
+        if "domain indexes" in normalized_title:
+            return "domain_indexes"
         if "modifiable parameters" in normalized_title:
             return "modifiable_parameters"
         if "datafiles" in normalized_title:

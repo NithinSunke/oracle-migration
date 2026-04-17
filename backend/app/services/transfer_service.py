@@ -11,6 +11,8 @@ from backend.app.adapters.oracle import (
 )
 from backend.app.schemas.transfer import (
     DataPumpCapabilitiesResponse,
+    DataPumpConnectivityDiagnosticsRequest,
+    DataPumpConnectivityDiagnosticsResponse,
     DataPumpJobCreate,
     DataPumpJobListResponse,
     DataPumpJobPurgeResponse,
@@ -27,6 +29,14 @@ class DataPumpTransferService:
         self._adapter = adapter or OracleDataPumpAdapter()
 
     def create_job(self, request: DataPumpJobCreate) -> DataPumpJobRecord:
+        return self._queue_job(request)
+
+    def _queue_job(
+        self,
+        request: DataPumpJobCreate,
+        *,
+        retry_of_job_id: str | None = None,
+    ) -> DataPumpJobRecord:
         if (
             request.operation == "IMPORT"
             and request.options.transfer_dump_files
@@ -43,7 +53,10 @@ class DataPumpTransferService:
             except OracleDataPumpExecutionDisabledError as exc:
                 raise ValueError(str(exc)) from exc
 
-        record = persistence_service.create_datapump_job(request)
+        record = persistence_service.create_datapump_job(
+            request,
+            retry_of_job_id=retry_of_job_id,
+        )
         job = celery_app.send_task(
             self.task_name,
             kwargs={
@@ -56,6 +69,25 @@ class DataPumpTransferService:
             task_id=job.id,
         )
 
+    def retry_job(self, job_id: str) -> DataPumpJobRecord:
+        existing = persistence_service.get_datapump_job(job_id)
+        if existing is None:
+            raise ValueError(f"Data Pump job '{job_id}' was not found.")
+        if existing.status != "FAILED":
+            raise ValueError("Only failed Data Pump jobs can be retried.")
+
+        request = DataPumpJobCreate(
+            request_id=existing.request_id,
+            job_name=(existing.job_name or existing.job_id) + " retry",
+            operation=existing.operation,
+            scope=existing.scope,
+            dry_run=existing.dry_run,
+            source_connection=existing.source_connection,
+            target_connection=existing.target_connection,
+            options=existing.options,
+        )
+        return self._queue_job(request, retry_of_job_id=existing.job_id)
+
     def get_job(self, job_id: str) -> DataPumpJobRecord | None:
         return persistence_service.get_datapump_job(job_id)
 
@@ -64,10 +96,13 @@ class DataPumpTransferService:
         return DataPumpJobListResponse(items=items, total=len(items))
 
     def purge_jobs(self) -> DataPumpJobPurgeResponse:
-        purged_job_ids, skipped_active_job_ids = persistence_service.purge_datapump_jobs()
+        purged_job_ids, skipped_active_job_ids, preserved_recent_count = (
+            persistence_service.purge_datapump_jobs()
+        )
         return DataPumpJobPurgeResponse(
             purged_job_ids=purged_job_ids,
             purged_count=len(purged_job_ids),
+            preserved_recent_count=preserved_recent_count,
             skipped_active_job_ids=skipped_active_job_ids,
             skipped_active_count=len(skipped_active_job_ids),
         )
@@ -103,6 +138,16 @@ class DataPumpTransferService:
             note=note,
         )
 
+    def run_connectivity_diagnostics(
+        self,
+        request: DataPumpConnectivityDiagnosticsRequest,
+    ) -> DataPumpConnectivityDiagnosticsResponse:
+        return self._adapter.run_connectivity_diagnostics(
+            source_connection=request.source_connection,
+            target_connection=request.target_connection,
+            object_storage=request.object_storage,
+        )
+
     def run_job(self, job_id: str, payload: dict[str, object]) -> DataPumpJobRecord:
         started_at = datetime.now(timezone.utc)
         persistence_service.update_datapump_job(
@@ -115,17 +160,31 @@ class DataPumpTransferService:
         try:
             result_payload = self._adapter.execute_job(request)
         except OracleDataPumpExecutionFailedError as exc:
+            result_payload = dict(exc.result_payload)
+            failure_analysis = self._adapter.analyze_failure(result_payload)
+            if failure_analysis is not None:
+                result_payload["failure_analysis"] = failure_analysis.model_dump(mode="json")
             return persistence_service.update_datapump_job(
                 job_id,
                 status="FAILED",
-                result_payload=exc.result_payload,
+                result_payload=result_payload,
                 error_message=str(exc),
                 completed_at=datetime.now(timezone.utc),
             )
         except OracleDataPumpError as exc:
+            result_payload = {
+                "output_excerpt": [str(exc)],
+                "output_log": [str(exc)],
+                "oracle_log_lines": [],
+                "artifact_paths": [],
+            }
+            failure_analysis = self._adapter.analyze_failure(result_payload)
+            if failure_analysis is not None:
+                result_payload["failure_analysis"] = failure_analysis.model_dump(mode="json")
             return persistence_service.update_datapump_job(
                 job_id,
                 status="FAILED",
+                result_payload=result_payload,
                 error_message=str(exc),
                 completed_at=datetime.now(timezone.utc),
             )

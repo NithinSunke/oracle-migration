@@ -2,6 +2,10 @@ import { useEffect, useState } from "react";
 
 import { navigate } from "../app/router";
 import { AppFrame } from "../components/AppFrame";
+import { MigrationReadinessSummary } from "../components/MigrationReadinessSummary";
+import { PostImportValidationPanel } from "../components/PostImportValidationPanel";
+import { RemediationPackPanel } from "../components/RemediationPackPanel";
+import { SchemaDependencyAnalyzer } from "../components/SchemaDependencyAnalyzer";
 import { StatusPanel } from "../components/StatusPanel";
 import { ImplementationPlanFromReport } from "../features/implementation-plan/ImplementationPlanView";
 import { api, ApiError } from "../services/api";
@@ -131,14 +135,42 @@ function formatApproachLabel(value: string): string {
     .join(" ");
 }
 
+function escapeHtml(value: string | null | undefined): string {
+  if (!value) {
+    return "";
+  }
+
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function downloadTextFile(
+  filename: string,
+  content: string,
+  contentType: string,
+): void {
+  const blob = new Blob([content], { type: contentType });
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
+}
+
 function getMethodCatalog(report: RecommendationReport) {
   const canonicalMethods = [
     "DATAPUMP",
-    "RMAN",
+    "RMAN_TRANSPORT",
     "GOLDENGATE",
+    "XTTS",
     "ZDM",
-    "TRANSPORTABLE_TABLESPACES",
-    "DATA_GUARD",
   ];
   const primary = normalizeApproachName(report.summary.recommended_approach);
   const secondary = report.recommendation.secondary_option
@@ -183,6 +215,56 @@ function getMethodCatalog(report: RecommendationReport) {
         "Not explicitly scored in the current report. Review manually if needed.",
     };
   });
+}
+
+function getDependencyObjectNames(issue: {
+  object_names?: string[];
+  examples?: string[];
+}): string[] {
+  if (issue.object_names?.length) {
+    return issue.object_names;
+  }
+
+  return issue.examples ?? [];
+}
+
+function getRemediationHtml(report: RecommendationReport): string {
+  const pack = report.migration.migration_validation?.remediation_pack;
+  if (!pack || !pack.scripts.length) {
+    return "";
+  }
+
+  return `
+      <section>
+        <h2>SQL Remediation Pack</h2>
+        <p>${escapeHtml(pack.summary)}</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Script</th>
+              <th>Category</th>
+              <th>Status</th>
+              <th>Summary</th>
+              <th>SQL</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${pack.scripts
+              .map(
+                (script) => `
+                  <tr>
+                    <td>${escapeHtml(script.label)}</td>
+                    <td>${escapeHtml(script.category.replace(/_/g, " "))}</td>
+                    <td>${escapeHtml(script.status)}</td>
+                    <td>${escapeHtml(script.summary)}</td>
+                    <td><pre>${escapeHtml(script.sql)}</pre></td>
+                  </tr>`,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </section>
+    `;
 }
 
 function clampScore(value: number): number {
@@ -302,6 +384,378 @@ function getNextActions(report: RecommendationReport) {
   return Array.from(new Set(actions)).slice(0, 6);
 }
 
+function buildHtmlReport(report: RecommendationReport): string {
+  const validation = report.migration.migration_validation;
+  const readiness = validation?.readiness;
+  const alerts = getReportAlerts(report);
+  const topSchemas = getTopSchemas(report);
+  const generatedAt = formatDate(report.generated_at);
+  const validatedAt = validation ? formatDate(validation.validated_at) : "Not available";
+
+  const readinessHtml = readiness
+    ? `
+      <section>
+        <h2>Pre-Migration Readiness</h2>
+        <div class="metric-grid">
+          <div class="metric-card">
+            <span>Overall Score</span>
+            <strong>${readiness.overall_score}/100</strong>
+          </div>
+          <div class="metric-card">
+            <span>Verdict</span>
+            <strong>${escapeHtml(readiness.verdict)}</strong>
+          </div>
+        </div>
+        <p>${escapeHtml(readiness.summary)}</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Category</th>
+              <th>Factor</th>
+              <th>Status</th>
+              <th>Score</th>
+              <th>Observation</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${readiness.categories
+              .flatMap((category) =>
+                category.factors.map(
+                  (factor) => `
+                    <tr>
+                      <td>${escapeHtml(category.label)}</td>
+                      <td>${escapeHtml(factor.label)}</td>
+                      <td>${escapeHtml(factor.status)}</td>
+                      <td>${factor.score}/100</td>
+                      <td>${escapeHtml(factor.observation)}</td>
+                    </tr>`,
+                ),
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </section>
+    `
+    : "";
+
+  const dependencyAnalysis = report.migration.source_metadata?.dependency_analysis;
+  const dependencyHtml = dependencyAnalysis
+    ? `
+      <section>
+        <h2>Schema Dependency Analyzer</h2>
+        <div class="metric-grid">
+          <div class="metric-card">
+            <span>Status</span>
+            <strong>${escapeHtml(dependencyAnalysis.status)}</strong>
+          </div>
+          <div class="metric-card">
+            <span>High Risk</span>
+            <strong>${dependencyAnalysis.high_risk_count}</strong>
+          </div>
+          <div class="metric-card">
+            <span>Review</span>
+            <strong>${dependencyAnalysis.review_count}</strong>
+          </div>
+          <div class="metric-card">
+            <span>Clear</span>
+            <strong>${dependencyAnalysis.clear_count}</strong>
+          </div>
+        </div>
+        <p>${escapeHtml(dependencyAnalysis.summary)}</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Dependency</th>
+              <th>Status</th>
+              <th>Objects</th>
+              <th>Observation</th>
+              <th>Object Names</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${dependencyAnalysis.issues
+              .map(
+                (issue) => `
+                  <tr>
+                    <td>${escapeHtml(issue.label)}</td>
+                    <td>${escapeHtml(issue.status)}</td>
+                    <td>${issue.object_count}</td>
+                    <td>${escapeHtml(issue.observation)}</td>
+                    <td>${escapeHtml(getDependencyObjectNames(issue).join("; "))}</td>
+                  </tr>`,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </section>
+    `
+    : "";
+  const remediationHtml = getRemediationHtml(report);
+
+  const validationChecksHtml = validation
+    ? `
+      <section>
+        <h2>Target Validation</h2>
+        <div class="metric-grid">
+          <div class="metric-card">
+            <span>Status</span>
+            <strong>${escapeHtml(validation.status)}</strong>
+          </div>
+          <div class="metric-card">
+            <span>Source Connection</span>
+            <strong>${escapeHtml(validation.source_connection_status)}</strong>
+          </div>
+          <div class="metric-card">
+            <span>Target Connection</span>
+            <strong>${escapeHtml(validation.target_connection_status)}</strong>
+          </div>
+          <div class="metric-card">
+            <span>Validated At</span>
+            <strong>${escapeHtml(validatedAt)}</strong>
+          </div>
+        </div>
+        <p>${escapeHtml(validation.summary)}</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Check</th>
+              <th>Status</th>
+              <th>Source</th>
+              <th>Target</th>
+              <th>Observation</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${validation.checks
+              .map(
+                (check) => `
+                  <tr>
+                    <td>${escapeHtml(check.label)}</td>
+                    <td>${escapeHtml(check.status)}</td>
+                    <td>${escapeHtml(check.source_value ?? "")}</td>
+                    <td>${escapeHtml(check.target_value ?? "")}</td>
+                    <td>${escapeHtml(check.message)}</td>
+                  </tr>`,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </section>
+    `
+    : "";
+
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${escapeHtml(report.request_id)} Migration Report</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 32px;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        color: #102033;
+        background: #f7f8f6;
+      }
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        background: #ffffff;
+        border-radius: 24px;
+        padding: 32px;
+        box-shadow: 0 20px 50px rgba(16, 32, 51, 0.08);
+      }
+      h1, h2, h3, p {
+        margin-top: 0;
+      }
+      .eyebrow {
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: #0f6d69;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+        margin: 16px 0 20px;
+      }
+      .metric-card {
+        border: 1px solid #d9e1e7;
+        border-radius: 16px;
+        padding: 14px 16px;
+        background: #fbfcfb;
+      }
+      .metric-card span {
+        display: block;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: #537086;
+        margin-bottom: 6px;
+      }
+      .metric-card strong {
+        font-size: 20px;
+      }
+      section {
+        margin-top: 28px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 14px;
+      }
+      th, td {
+        border: 1px solid #d9e1e7;
+        padding: 10px 12px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: #eef4f2;
+      }
+      ul {
+        margin: 12px 0 0;
+        padding-left: 20px;
+      }
+      .two-col {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+      }
+      @media (max-width: 800px) {
+        body {
+          padding: 16px;
+        }
+        main {
+          padding: 20px;
+        }
+        .two-col {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="eyebrow">Oracle Migration Report</div>
+      <h1>${escapeHtml(report.summary.recommended_approach)} Recommendation Summary</h1>
+      <p>Request ${escapeHtml(report.request_id)} generated on ${escapeHtml(generatedAt)}.</p>
+
+      <div class="metric-grid">
+        <div class="metric-card">
+          <span>Recommended Approach</span>
+          <strong>${escapeHtml(report.summary.recommended_approach)}</strong>
+        </div>
+        <div class="metric-card">
+          <span>Confidence</span>
+          <strong>${escapeHtml(report.summary.confidence)}</strong>
+        </div>
+        <div class="metric-card">
+          <span>Recommendation Score</span>
+          <strong>${report.summary.score}/100</strong>
+        </div>
+        <div class="metric-card">
+          <span>Rules Version</span>
+          <strong>${escapeHtml(report.summary.rules_version)}</strong>
+        </div>
+      </div>
+
+      ${readinessHtml}
+      ${dependencyHtml}
+      ${remediationHtml}
+      ${validationChecksHtml}
+
+      <section>
+        <h2>Recommendation Narrative</h2>
+        <ul>
+          ${report.summary.why.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+        </ul>
+      </section>
+
+      <section class="two-col">
+        <div>
+          <h2>Warnings</h2>
+          ${
+            alerts.warnings.length
+              ? `<ul>${alerts.warnings
+                  .map((item) => `<li>${escapeHtml(item)}</li>`)
+                  .join("")}</ul>`
+              : "<p>No warnings are currently stored for this report.</p>"
+          }
+        </div>
+        <div>
+          <h2>Blockers</h2>
+          ${
+            alerts.blockers.length
+              ? `<ul>${alerts.blockers
+                  .map((item) => `<li>${escapeHtml(item)}</li>`)
+                  .join("")}</ul>`
+              : "<p>No blockers are currently stored for this report.</p>"
+          }
+        </div>
+      </section>
+
+      <section class="two-col">
+        <div>
+          <h2>Prerequisites</h2>
+          ${
+            alerts.prerequisites.length
+              ? `<ul>${alerts.prerequisites
+                  .map((item) => `<li>${escapeHtml(item)}</li>`)
+                  .join("")}</ul>`
+              : "<p>No explicit prerequisites are stored for this report.</p>"
+          }
+        </div>
+        <div>
+          <h2>Next Actions</h2>
+          <ul>
+            ${getNextActions(report)
+              .map((item) => `<li>${escapeHtml(item)}</li>`)
+              .join("")}
+          </ul>
+        </div>
+      </section>
+
+      <section>
+        <h2>Top Source Schemas By Object Count</h2>
+        ${
+          topSchemas.length
+            ? `<table>
+                <thead>
+                  <tr>
+                    <th>Schema</th>
+                    <th>Objects</th>
+                    <th>Tables</th>
+                    <th>Indexes</th>
+                    <th>Invalid Objects</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${topSchemas
+                    .map(
+                      (schema) => `
+                        <tr>
+                          <td>${escapeHtml(schema.owner)}</td>
+                          <td>${schema.object_count}</td>
+                          <td>${schema.table_count}</td>
+                          <td>${schema.index_count}</td>
+                          <td>${schema.invalid_object_count}</td>
+                        </tr>`,
+                    )
+                    .join("")}
+                </tbody>
+              </table>`
+            : "<p>No schema inventory is available in the stored report.</p>"
+        }
+      </section>
+    </main>
+  </body>
+</html>`;
+}
+
 function getInitialReportTab(): ReportTabId {
   if (typeof window === "undefined") {
     return "summary";
@@ -341,7 +795,8 @@ export function ReportsPage() {
   const [isHistoryLoading, setIsHistoryLoading] = useState(true);
   const [isReportLoading, setIsReportLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [downloadInProgress, setDownloadInProgress] = useState(false);
+  const [downloadJsonInProgress, setDownloadJsonInProgress] = useState(false);
+  const [downloadHtmlInProgress, setDownloadHtmlInProgress] = useState(false);
 
   const visibleDiscoverySections =
     report?.migration.source_metadata?.discovery_sections.filter(
@@ -434,12 +889,12 @@ export function ReportsPage() {
     };
   }, [selectedRequestId]);
 
-  async function handleDownload() {
+  async function handleDownloadJson() {
     if (!selectedRequestId) {
       return;
     }
 
-    setDownloadInProgress(true);
+    setDownloadJsonInProgress(true);
     setErrorMessage(null);
     try {
       await api.downloadReport(selectedRequestId);
@@ -450,7 +905,27 @@ export function ReportsPage() {
         setErrorMessage("Unable to download the report.");
       }
     } finally {
-      setDownloadInProgress(false);
+      setDownloadJsonInProgress(false);
+    }
+  }
+
+  function handleDownloadHtml() {
+    if (!report) {
+      return;
+    }
+
+    setDownloadHtmlInProgress(true);
+    setErrorMessage(null);
+    try {
+      downloadTextFile(
+        `${report.request_id}-report.html`,
+        buildHtmlReport(report),
+        "text/html;charset=utf-8",
+      );
+    } catch {
+      setErrorMessage("Unable to download the HTML report.");
+    } finally {
+      setDownloadHtmlInProgress(false);
     }
   }
 
@@ -467,14 +942,24 @@ export function ReportsPage() {
       pageClassName="page--wide"
       actions={
         report ? (
-          <button
-            className="primary-button"
-            type="button"
-            onClick={handleDownload}
-            disabled={downloadInProgress}
-          >
-            {downloadInProgress ? "Downloading Report" : "Download JSON Report"}
-          </button>
+          <div className="summary-actions">
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={handleDownloadHtml}
+              disabled={downloadHtmlInProgress}
+            >
+              {downloadHtmlInProgress ? "Downloading HTML Report" : "Download HTML Report"}
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={handleDownloadJson}
+              disabled={downloadJsonInProgress}
+            >
+              {downloadJsonInProgress ? "Downloading JSON Report" : "Download JSON Report"}
+            </button>
+          </div>
         ) : undefined
       }
     >
@@ -995,6 +1480,12 @@ export function ReportsPage() {
                             </>
                           ) : null}
 
+                          <SchemaDependencyAnalyzer
+                            analysis={
+                              report.migration.source_metadata?.dependency_analysis
+                            }
+                          />
+
                           {report.recommendation.metadata_enrichment?.errors.length ? (
                             <div className="form-alert form-alert--error">
                               <strong>Metadata collection errors</strong>
@@ -1113,9 +1604,23 @@ export function ReportsPage() {
                               </dl>
                               <p>{report.migration.migration_validation.summary}</p>
 
+                              <MigrationReadinessSummary
+                                assessment={report.migration.migration_validation}
+                              />
+
+                              <RemediationPackPanel
+                                pack={report.migration.migration_validation.remediation_pack}
+                                requestId={report.migration.request_id}
+                              />
+
+                              <PostImportValidationPanel
+                                migration={report.migration}
+                                requestId={report.migration.request_id}
+                              />
+
                               {report.migration.migration_validation.checks.length ? (
                                 <div className="table-wrap">
-                                  <table className="results-table results-table--compact">
+                                  <table className="results-table results-table--compact results-table--validation">
                                     <thead>
                                       <tr>
                                         <th>Check</th>

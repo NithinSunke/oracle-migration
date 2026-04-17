@@ -22,9 +22,14 @@ from backend.app.schemas.oracle import (
     OracleTargetMetadata,
 )
 from backend.app.schemas.recommendation import RecommendationResponse
+from backend.app.services.oracle_dependency_analysis import (
+    DEPENDENCY_ANALYSIS_VERSION,
+    oracle_dependency_analysis_service,
+)
 from backend.app.schemas.transfer import (
     DataPumpCommandPreview,
     DataPumpJobCreate,
+    DataPumpFailureAnalysis,
     DataPumpJobRecord,
 )
 
@@ -35,6 +40,84 @@ class PersistenceService:
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _backfill_source_metadata_dependency_analysis(
+        source_metadata_payload: dict | None,
+    ) -> tuple[dict | None, bool]:
+        if not source_metadata_payload:
+            return source_metadata_payload, False
+
+        dependency_analysis = source_metadata_payload.get("dependency_analysis")
+        if dependency_analysis is not None and not PersistenceService._dependency_analysis_needs_refresh(
+            dependency_analysis
+        ):
+            return source_metadata_payload, False
+
+        if not source_metadata_payload.get("discovery_sections"):
+            return source_metadata_payload, False
+
+        try:
+            metadata = OracleSourceMetadata(**source_metadata_payload)
+        except Exception:
+            return source_metadata_payload, False
+
+        metadata.dependency_analysis = oracle_dependency_analysis_service.analyze(metadata)
+        return metadata.model_dump(mode="json", exclude_none=True), True
+
+    @staticmethod
+    def _dependency_analysis_needs_refresh(dependency_analysis_payload: object) -> bool:
+        if not isinstance(dependency_analysis_payload, dict):
+            return True
+
+        if int(dependency_analysis_payload.get("analysis_version") or 0) < DEPENDENCY_ANALYSIS_VERSION:
+            return True
+
+        issues = dependency_analysis_payload.get("issues")
+        if not isinstance(issues, list):
+            return True
+
+        for issue in issues:
+            if not isinstance(issue, dict):
+                return True
+            if "object_names" not in issue:
+                return True
+
+        return False
+
+    def _build_migration_record_from_model(
+        self,
+        record: MigrationRequestModel,
+        *,
+        persist_backfill: bool,
+    ) -> MigrationRecord:
+        source_metadata_payload, source_backfilled = (
+            self._backfill_source_metadata_dependency_analysis(
+                record.source_metadata_payload or {}
+            )
+        )
+
+        if persist_backfill and source_backfilled:
+            with session_scope() as session:
+                persistent_record = session.get(MigrationRequestModel, record.request_id)
+                if persistent_record is not None:
+                    persistent_record.source_metadata_payload = source_metadata_payload or {}
+
+        return MigrationRecord(
+            request_id=record.request_id,
+            source=record.source_payload,
+            target=record.target_payload,
+            scope=record.scope_payload,
+            business=record.business_payload,
+            connectivity=record.connectivity_payload,
+            features=record.features_payload,
+            metadata_collection=record.metadata_collection_payload or None,
+            source_metadata=source_metadata_payload or None,
+            target_metadata=record.target_metadata_payload or None,
+            migration_validation=record.migration_validation_payload or None,
+            created_at=self._normalize_utc(record.created_at),
+            status=record.status,
+        )
 
     def save_migration_request(
         self,
@@ -107,20 +190,9 @@ class PersistenceService:
                 record.status = "submitted"
             session.flush()
 
-            return MigrationRecord(
-                request_id=record.request_id,
-                source=record.source_payload,
-                target=record.target_payload,
-                scope=record.scope_payload,
-                business=record.business_payload,
-                connectivity=record.connectivity_payload,
-                features=record.features_payload,
-                metadata_collection=record.metadata_collection_payload or None,
-                source_metadata=record.source_metadata_payload or None,
-                target_metadata=record.target_metadata_payload or None,
-                migration_validation=record.migration_validation_payload or None,
-                created_at=self._normalize_utc(record.created_at),
-                status=record.status,
+            return self._build_migration_record_from_model(
+                record,
+                persist_backfill=False,
             )
 
     def get_migration_request(self, request_id: str) -> MigrationRecord | None:
@@ -129,20 +201,9 @@ class PersistenceService:
             if record is None:
                 return None
 
-            return MigrationRecord(
-                request_id=record.request_id,
-                source=record.source_payload,
-                target=record.target_payload,
-                scope=record.scope_payload,
-                business=record.business_payload,
-                connectivity=record.connectivity_payload,
-                features=record.features_payload,
-                metadata_collection=record.metadata_collection_payload or None,
-                source_metadata=record.source_metadata_payload or None,
-                target_metadata=record.target_metadata_payload or None,
-                migration_validation=record.migration_validation_payload or None,
-                created_at=self._normalize_utc(record.created_at),
-                status=record.status,
+            return self._build_migration_record_from_model(
+                record,
+                persist_backfill=True,
             )
 
     def save_recommendation(
@@ -261,18 +322,25 @@ class PersistenceService:
 
             return items
 
-    def create_datapump_job(self, request: DataPumpJobCreate) -> DataPumpJobRecord:
+    def create_datapump_job(
+        self,
+        request: DataPumpJobCreate,
+        *,
+        retry_of_job_id: str | None = None,
+    ) -> DataPumpJobRecord:
         payload = request.to_storage_payload()
 
         with session_scope() as session:
             record = DataPumpJobModel(
                 job_id=request.job_id,
                 request_id=request.request_id,
+                retry_of_job_id=retry_of_job_id,
                 job_name=request.job_name,
                 operation=request.operation,
                 scope=request.scope,
                 status="QUEUED",
                 dry_run=request.dry_run,
+                visible_in_app=True,
                 source_connection_payload=payload.get("source_connection") or {},
                 target_connection_payload=payload.get("target_connection") or {},
                 options_payload=payload["options"],
@@ -325,34 +393,43 @@ class PersistenceService:
         with session_scope() as session:
             stmt = (
                 select(DataPumpJobModel)
+                .where(DataPumpJobModel.visible_in_app.is_(True))
                 .order_by(DataPumpJobModel.created_at.desc())
                 .limit(limit)
             )
             rows = session.execute(stmt).scalars().all()
             return [self._to_datapump_job_record(row) for row in rows]
 
-    def purge_datapump_jobs(self) -> tuple[list[str], list[str]]:
+    def purge_datapump_jobs(self, *, keep_recent_completed: int = 5) -> tuple[list[str], list[str], int]:
         purged_job_ids: list[str] = []
         skipped_active_job_ids: list[str] = []
+        preserved_recent_count = 0
 
         with session_scope() as session:
             stmt = select(DataPumpJobModel).order_by(DataPumpJobModel.created_at.desc())
             rows = session.execute(stmt).scalars().all()
+            completed_visible_seen = 0
 
             for record in rows:
                 if record.status in {"QUEUED", "RUNNING"}:
                     skipped_active_job_ids.append(record.job_id)
+                    record.visible_in_app = True
                     continue
 
-                purged_job_ids.append(record.job_id)
-                session.delete(record)
+                if completed_visible_seen < keep_recent_completed:
+                    completed_visible_seen += 1
+                    preserved_recent_count += 1
+                    record.visible_in_app = True
+                    continue
+
+                if record.visible_in_app:
+                    purged_job_ids.append(record.job_id)
+
+                record.visible_in_app = False
 
             session.flush()
 
-        for job_id in purged_job_ids:
-            self._cleanup_datapump_work_dir(job_id)
-
-        return purged_job_ids, skipped_active_job_ids
+        return purged_job_ids, skipped_active_job_ids, preserved_recent_count
 
     def _cleanup_datapump_work_dir(self, job_id: str) -> None:
         work_root = Path(settings.datapump_work_dir).resolve()
@@ -376,16 +453,23 @@ class PersistenceService:
         return DataPumpJobRecord(
             job_id=record.job_id,
             request_id=record.request_id,
+            retry_of_job_id=record.retry_of_job_id,
             task_id=record.task_id,
             job_name=record.job_name,
             operation=record.operation,
             scope=record.scope,
             status=record.status,
+            can_retry=record.status == "FAILED",
             dry_run=record.dry_run,
             source_connection=record.source_connection_payload,
             target_connection=record.target_connection_payload or None,
             options=record.options_payload,
             command_preview=command_preview,
+            failure_analysis=(
+                DataPumpFailureAnalysis(**record.result_payload.get("failure_analysis"))
+                if record.result_payload.get("failure_analysis")
+                else None
+            ),
             output_excerpt=record.result_payload.get("output_excerpt", []),
             output_log=record.result_payload.get(
                 "output_log",
